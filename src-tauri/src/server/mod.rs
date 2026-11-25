@@ -43,17 +43,24 @@ impl ServerState {
 /// 启动 HTTP 服务（阻塞直到进程退出）。
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = data_dir();
+    eprintln!("[server] data_dir = {}", data_dir.display());
     std::fs::create_dir_all(&data_dir)?;
     let web_dir = web_dir();
+    eprintln!("[server] web_dir = {}", web_dir.display());
     let host = std::env::var("BILIMUSIC_HOST").unwrap_or_else(|_| "0.0.0.0".into());
     let port: u16 = std::env::var("BILIMUSIC_PORT")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(8899);
 
+    eprintln!("[server] initializing requests");
     crate::infrastructure::providers::bilibili::initialize_requests(&data_dir);
+
+    eprintln!("[server] opening database");
     let database = Database::open_at(data_dir.clone())?;
+    eprintln!("[server] starting media proxy");
     let media_proxy = MediaProxy::start_at(&data_dir).await?;
+    eprintln!("[server] creating bilibili provider");
     let bilibili = BilibiliProvider::new()?;
     let saved_cookie = database
         .0
@@ -62,6 +69,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|connection| AuthRepository::get_cookie(&connection, "bilibili").ok().flatten());
     bilibili.set_session_cookie(saved_cookie).await;
 
+    eprintln!("[server] building mock tauri app");
     let builder = tauri::test::mock_builder().manage(UpdateState::default());
     let app = crate::register_commands(builder)
         .build(tauri::test::mock_context(tauri::test::noop_assets()))?;
@@ -73,6 +81,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     app.manage(MusicCatalogProvider::new()?);
     app.manage(crate::sync::SyncState::default());
 
+    eprintln!("[server] creating mock webview window");
     tauri::WebviewWindowBuilder::new(&app, "main", Default::default()).build()?;
 
     let state = Arc::new(ServerState {
@@ -93,6 +102,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .fallback(static_file)
         .with_state(state);
 
+    eprintln!("[server] binding listener on {}:{}", host, port);
     let listener = tokio::net::TcpListener::bind((host.as_str(), port)).await?;
     eprintln!(
         "BiliMusic web server listening on http://{host}:{port} (data: {}, web: {})",
