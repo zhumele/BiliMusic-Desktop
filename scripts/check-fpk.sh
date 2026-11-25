@@ -61,7 +61,8 @@ entry = config.get(".url", {}).get(launch)
 assert entry, f"app/ui/config 缺少入口 {launch}"
 assert entry.get("type") in ("url", "iframe"), "入口 type 需为 url 或 iframe"
 entry_port = str(entry.get("port"))
-assert entry_port in ("{port}", port), "入口 port 需为 {port} 占位符或与 manifest.service_port 一致"
+# 飞牛不会替换 {port} 占位符，入口必须写与 manifest.service_port 一致的固定端口
+assert entry_port == port, f"入口 port 需为固定数字且等于 manifest.service_port（{port}），不能使用占位符"
 PY
 
 for icon in "$PKG_DIR/ICON.PNG" "$PKG_DIR/ICON_256.PNG" "$PKG_DIR/app/$uidir/images/icon_64.png" "$PKG_DIR/app/$uidir/images/icon_256.png"; do
