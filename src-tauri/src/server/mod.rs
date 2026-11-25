@@ -44,7 +44,8 @@ impl ServerState {
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = data_dir();
     eprintln!("[server] data_dir = {}", data_dir.display());
-    std::fs::create_dir_all(&data_dir)?;
+    std::fs::create_dir_all(&data_dir)
+        .map_err(|e| format!("创建数据目录 {} 失败: {e}", data_dir.display()))?;
     let web_dir = web_dir();
     eprintln!("[server] web_dir = {}", web_dir.display());
     let host = std::env::var("BILIMUSIC_HOST").unwrap_or_else(|_| "0.0.0.0".into());
@@ -57,11 +58,14 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     crate::infrastructure::providers::bilibili::initialize_requests(&data_dir);
 
     eprintln!("[server] opening database");
-    let database = Database::open_at(data_dir.clone())?;
+    let database = Database::open_at(data_dir.clone())
+        .map_err(|e| format!("打开数据库 {} 失败: {e}", data_dir.display()))?;
     eprintln!("[server] starting media proxy");
-    let media_proxy = MediaProxy::start_at(&data_dir).await?;
+    let media_proxy = MediaProxy::start_at(&data_dir)
+        .await
+        .map_err(|e| format!("启动媒体代理失败: {e}"))?;
     eprintln!("[server] creating bilibili provider");
-    let bilibili = BilibiliProvider::new()?;
+    let bilibili = BilibiliProvider::new().map_err(|e| format!("初始化 B 站客户端失败: {e}"))?;
     let saved_cookie = database
         .0
         .lock()
@@ -72,17 +76,20 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("[server] building mock tauri app");
     let builder = tauri::test::mock_builder().manage(UpdateState::default());
     let app = crate::register_commands(builder)
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))?;
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .map_err(|e| format!("构建 Tauri 应用失败: {e}"))?;
     app.manage(Diagnostics::open(data_dir.join("diagnostics-v1")));
     app.manage(database);
     app.manage(media_proxy);
     app.manage(bilibili);
-    app.manage(LrclibProvider::new()?);
-    app.manage(MusicCatalogProvider::new()?);
+    app.manage(LrclibProvider::new().map_err(|e| format!("初始化歌词源失败: {e}"))?);
+    app.manage(MusicCatalogProvider::new().map_err(|e| format!("初始化音乐库失败: {e}"))?);
     app.manage(crate::sync::SyncState::default());
 
     eprintln!("[server] creating mock webview window");
-    tauri::WebviewWindowBuilder::new(&app, "main", Default::default()).build()?;
+    tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+        .build()
+        .map_err(|e| format!("创建 webview 失败: {e}"))?;
 
     let state = Arc::new(ServerState {
         app: app.handle().clone(),
@@ -103,7 +110,9 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .with_state(state);
 
     eprintln!("[server] binding listener on {}:{}", host, port);
-    let listener = tokio::net::TcpListener::bind((host.as_str(), port)).await?;
+    let listener = tokio::net::TcpListener::bind((host.as_str(), port))
+        .await
+        .map_err(|e| format!("监听 {host}:{port} 失败: {e}"))?;
     eprintln!(
         "BiliMusic web server listening on http://{host}:{port} (data: {}, web: {})",
         data_dir.display(),
