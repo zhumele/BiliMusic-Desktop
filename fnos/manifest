@@ -1,5 +1,5 @@
 appname               = bilimusic
-version               = 0.4.5
+version               = 0.4.6
 display_name          = BiliMusic
 desc                  = 播放 B 站音乐与合集的桌面级音乐播放器：搜索、收藏、歌单、歌词与播放队列。应用以普通权限运行，浏览器与飞牛桌面均可访问，并适配手机页面。
 platform              = x86
@@ -14,4 +14,4 @@ desktop_applaunchname = bilimusic.Application
 service_port          = 8899
 checkport             = false
 ctl_stop              = true
-changelog             = 0.4.5：修复无桌面会话下 webview 数据目录权限导致的启动失败；桌面入口改为固定端口，可在飞牛桌面直接打开。
+changelog             = 0.4.6：修复局域网 HTTP 访问时 crypto.randomUUID 缺失导致页面停在启动画面；桌面入口固定端口，可在飞牛桌面直接打开。
