@@ -87,7 +87,13 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     app.manage(crate::sync::SyncState::default());
 
     eprintln!("[server] creating mock webview window");
-    tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+    let builder = tauri::WebviewWindowBuilder::new(&app, "main", Default::default());
+    // 无桌面会话时 $HOME/XDG 数据目录通常不可写，Tauri 默认会用
+    // app_local_data_dir 作为 webview 数据目录并 create_dir_all，导致
+    // Permission denied。这里显式指定到包自己的可写数据目录。
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    let builder = builder.data_directory(data_dir.join("webview"));
+    builder
         .build()
         .map_err(|e| format!("创建 webview 失败: {e}"))?;
 
