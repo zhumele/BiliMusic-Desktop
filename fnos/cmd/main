@@ -17,7 +17,9 @@ LOG_MAX_BYTES=2097152
 BIN="$APP_DIR/bin/bilimusic-server"
 WEB_DIR="$APP_DIR/web"
 
-mkdir -p "$DATA_DIR"
+mkdir -p "$DATA_DIR" "$DATA_DIR/playback-v1"
+# fnOS 升级/恢复时数据目录可能归 root 所有，这里尝试修复写权限
+[ -w "$DATA_DIR" ] || chmod -R u+w "$DATA_DIR" 2>/dev/null || true
 
 log_msg() {
   echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
@@ -38,8 +40,17 @@ start_process() {
   if is_running; then
     return 0
   fi
+
+  # 自修复：fnpack 在某些情况下会丢失执行权限，这里兜底
+  if [ -e "$BIN" ]; then
+    chmod 0755 "$BIN" 2>/dev/null || true
+  fi
+  if [ -d "$APP_DIR/lib" ]; then
+    chmod 0755 "$APP_DIR"/lib/*.so* 2>/dev/null || true
+  fi
+
   if [ ! -x "$BIN" ]; then
-    log_msg "启动失败：未找到可执行文件 $BIN"
+    log_msg "启动失败：无执行权限的二进制 $BIN"
     [ -n "${TRIM_TEMP_LOGFILE:-}" ] && echo "BiliMusic 缺少可执行文件 $BIN" >> "$TRIM_TEMP_LOGFILE"
     return 1
   fi
@@ -52,11 +63,13 @@ start_process() {
     mv -f "$LOG_FILE" "$LOG_FILE.1"
   fi
   log_msg "启动 BiliMusic（端口 ${PORT}，数据目录 ${DATA_DIR}）"
-  cd "$DATA_DIR" || return 1
+
   # 随包附带的 WebKitGTK/GTK 等运行库，避免依赖飞牛系统预装
   if [ -d "$APP_DIR/lib" ]; then
     export LD_LIBRARY_PATH="$APP_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
   fi
+
+  cd "$DATA_DIR" || return 1
   BILIMUSIC_HOST=0.0.0.0 \
   BILIMUSIC_PORT="$PORT" \
   BILIMUSIC_DATA_DIR="$DATA_DIR" \

@@ -64,8 +64,17 @@ rm -rf "$PKG_DIR/app/bin" "$PKG_DIR/app/web"
 mkdir -p "$PKG_DIR/app/bin" "$PKG_DIR/app/web"
 install -m 0755 "$BIN" "$PKG_DIR/app/bin/bilimusic-server"
 cp -R "$DIST_DIR/." "$PKG_DIR/app/web/"
-# 启动脚本必须保持可执行
-chmod 0755 "$PKG_DIR/cmd/main" "$PKG_DIR"/cmd/*_init 2>/dev/null || true
+# 启动脚本必须保持可执行；所有 .sh 也设 0755，避免 fnpack 丢权限
+chmod 0755 "$PKG_DIR/cmd/main" "$PKG_DIR"/cmd/*_init "$PKG_DIR"/cmd/*_callback "$PKG_DIR"/cmd/config_init 2>/dev/null || true
+chmod 0755 "$PKG_DIR"/cmd/*.sh 2>/dev/null || true
+# 运行库确保可读 + 可执行（ld-linux 要求）
+if [ -d "$PKG_DIR/app/lib" ]; then
+  chmod 0755 "$PKG_DIR/app/lib"/*.so* 2>/dev/null || true
+fi
+# 递归确保 bin、cmd 目录下所有可执行文件保持 0755；其他文件 0644
+find "$PKG_DIR/app/bin" -type f -exec chmod 0755 {} + 2>/dev/null || true
+find "$PKG_DIR/app/bin" -type d -exec chmod 0755 {} + 2>/dev/null || true
+find "$PKG_DIR/cmd" -type f -exec chmod 0755 {} + 2>/dev/null || true
 
 set_manifest version "$VERSION"
 set_manifest platform "$PLATFORM"
