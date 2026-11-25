@@ -44,7 +44,7 @@ docker run --rm --platform "$PLATFORM" \
   -v "$ROOT_DIR":/work -w /work \
   -e CARGO_HOME=/work/.cargo-linux \
   -e CARGO_TARGET_DIR=/work/target-linux \
-  "$IMAGE" bash -c 'cargo build --release --features server --bin bilimusic-server'
+  "$IMAGE" bash -c 'cd src-tauri && cargo build --release --features server --bin bilimusic-server'
 
 if [ ! -f "$TARGET_DIR/release/bilimusic-server" ]; then
   echo "构建完成但未找到 target-linux/release/bilimusic-server" >&2
