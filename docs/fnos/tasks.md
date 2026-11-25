@@ -42,13 +42,14 @@
 - [x] 5.4 修复发现的问题，回归。
 
 ## Step 6：Linux 构建 + fpk 打包
-- [ ] 6.1 `scripts/build-linux-docker.sh`：`rust:1-bookworm` + webkit2gtk/gtk/soup/dbus 依赖，输出 `target-linux/bilimusic-server` + `dist/`。
-- [ ] 6.2 `fnos/` 目录：manifest、config、cmd/*、app/ui/config、图标（沿用仓库 `assets`/`app-icon.svg` 转 64/256 png）。
-- [ ] 6.3 `scripts/build-fpk.sh`：组装 `payload/{bin,web,ui}` + 生成 `.fpk`。
-- [ ] 6.4 `scripts/check-fpk.sh`：校验 manifest 必填键、version 语义化、cmd 可执行、port、ui/config JSON。
-- [ ] 6.5 首次启动脚本在无 root 下建 `TRIM_PKGVAR` 数据目录并写日志。
+- [x] 6.1 `scripts/build-linux-docker.sh`：构建带 webkit2gtk/gtk/soup 等依赖的 `linux/amd64` 镜像，输出 `target-linux/release/bilimusic-server`。
+- [x] 6.2 `fnos/` 目录：manifest、config/privilege、config/resource、cmd/*、app/ui/config、图标（64/256 png）。
+- [x] 6.3 `scripts/build-fpk.sh`：组装 `app/{bin,web,ui,lib}` 并调用 `fnpack build --nosign` 生成 `.fpk`。
+- [x] 6.4 `scripts/check-fpk.sh`：校验 manifest 必填键、version 语义化、cmd 可执行、port、ui/config JSON。
+- [x] 6.5 启动脚本以包用户创建数据目录并写 `info.log`；安装阶段不写 root 目录。
+- [x] 6.6 `scripts/fetch-linux-runtime-libs.sh`：把 WebKitGTK/GTK 等共享库随包附带（`fnos/app/lib`），避免依赖飞牛系统预装；已在纯净 Debian 12 容器验证可启动。
 
 ## Step 7：交付
-- [ ] 7.1 `git add` + commit（`feat(fnos): web server mode + fpk packaging`）。
-- [ ] 7.2 push 到 `fork` 的 `fnos-web` 分支。
-- [ ] 7.3 输出：安装包路径、安装方式、端口、默认账号/数据目录、已知限制。
+- [x] 7.1 `git add` + commit（`feat(fnos): web server mode + fpk packaging`）。
+- [x] 7.2 push 到 `fork` 的 `fnos-web` 分支。
+- [x] 7.3 输出：安装包路径、安装方式、端口、默认账号/数据目录、已知限制。

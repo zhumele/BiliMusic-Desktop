@@ -38,6 +38,15 @@ PLATFORM="${PLATFORM:-$(manifest_value platform)}"
 
 [ -f "$DIST_DIR/index.html" ] || { echo "缺少 dist/index.html，请先执行 npm run build:web" >&2; exit 1; }
 [ -f "$BIN" ] || { echo "缺少 Linux 二进制 $BIN，请先执行 scripts/build-linux-docker.sh" >&2; exit 1; }
+if ! file "$BIN" | grep -q "ELF 64-bit"; then
+  echo "$BIN 不是 Linux x86_64 ELF 二进制，请用 scripts/build-linux-docker.sh 构建" >&2
+  exit 1
+fi
+
+if [ ! -d "$PKG_DIR/app/lib" ]; then
+  echo "==> 未找到运行时库 fnos/app/lib，开始收集"
+  "$ROOT_DIR/scripts/fetch-linux-runtime-libs.sh" >&2
+fi
 
 if [ -n "${FNPACK_BIN:-}" ]; then
   FNPACK="$FNPACK_BIN"

@@ -53,6 +53,10 @@ start_process() {
   fi
   log_msg "启动 BiliMusic（端口 ${PORT}，数据目录 ${DATA_DIR}）"
   cd "$DATA_DIR" || return 1
+  # 随包附带的 WebKitGTK/GTK 等运行库，避免依赖飞牛系统预装
+  if [ -d "$APP_DIR/lib" ]; then
+    export LD_LIBRARY_PATH="$APP_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  fi
   BILIMUSIC_HOST=0.0.0.0 \
   BILIMUSIC_PORT="$PORT" \
   BILIMUSIC_DATA_DIR="$DATA_DIR" \

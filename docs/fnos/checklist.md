@@ -29,10 +29,11 @@
 ## 飞牛（fnOS）应用包
 - [x] `fnos/` 含 manifest、config/privilege、config/resource、cmd/*、app/ui/config、图标、wizard
 - [x] `scripts/check-fpk.sh` 校验通过
-- [x] `fnpack build` 可生成 `.fpk`，且 `app.tgz` 内含 `bin/`、`web/`、`ui/`
-- [ ] Linux 二进制为 x86_64 ELF（`scripts/build-linux-docker.sh` 产物）
-- [ ] `dist-fpk/bilimusic-0.4.4-x86.fpk` 使用真实 Linux 二进制重新打包
-- [ ] `cmd/main` 以普通权限启动、写入 `info.log`，`status` 在未运行时返回 3
+- [x] `fnpack build` 可生成 `.fpk`，且 `app.tgz` 内含 `bin/`、`web/`、`ui/`、`lib/`
+- [x] Linux 二进制为 x86_64 ELF（`scripts/build-linux-docker.sh` 产物）
+- [x] `dist-fpk/bilimusic-0.4.4-x86.fpk` 使用真实 Linux 二进制重新打包
+- [x] `cmd/main` 以普通权限启动、写入 `info.log`，`status` 在未运行时返回 3
+- [x] 附带 WebKitGTK/GTK 运行库后，在未安装这些库的纯净 Debian 12 容器中可启动并完成搜索/播放代理验证
 
 ## 交付
-- [ ] 代码提交并推送到 fork 的 `fnos-web` 分支
+- [x] 代码提交并推送到 fork 的 `fnos-web` 分支

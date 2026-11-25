@@ -46,4 +46,5 @@ __pycache__/
 /tools/fnpack
 /fnos/app/bin/
 /fnos/app/web/
+/fnos/app/lib/
 
