@@ -11,7 +11,7 @@ import { syncOHOSQueue } from './ohosAudio'
 import { createOperationScope } from './operationScope'
 import { alignAudioSource, prepareAudioSource } from './sourceSwitch'
 import { accountEpoch, advanceAccountEpoch } from '../../services/accountScope'
-import { isMobile, isIOS, isAndroid, isOHOS } from '../../services/platform'
+import { isMobile, isNativeMobile, isIOS, isAndroid, isOHOS } from '../../services/platform'
 import { observeMobileAudio, setMobileCollection, prepareMobileAudio, playMobileAudio, controlMobileAudio, snapshotMobileAudio, mobilePlaybackClock } from './mobileAudio'
 import { syncAndroidQueue } from './androidAudio'
 import { iosListenerAge, playIOSAudio, restartIOSAudioObservation, syncIOSQueue, type IOSAudioState } from './iosAudio'
@@ -60,13 +60,13 @@ function applyDesktopOutput(smooth = false) {
 }
 export async function applyLoudnessSetting() {
   const setting = useLoudnessSettings.getState()
-  if (isMobile) await controlMobileAudio('loudness', setting.enabled ? 1 : 0, setting.revision)
+  if (isNativeMobile) await controlMobileAudio('loudness', setting.enabled ? 1 : 0, setting.revision)
   else applyDesktopOutput(true)
 }
 const controlScope = createOperationScope()
 let playRequest = 0
 let logicalPlaybackVersion = 0
-export const logicalPlaybackIdentity = () => `${logicalPlaybackVersion}:${isMobile ? nativeSession || '' : ''}`
+export const logicalPlaybackIdentity = () => `${logicalPlaybackVersion}:${isNativeMobile ? nativeSession || '' : ''}`
 let playbackTrace: { id: string; trace: ReturnType<typeof startDiagnosticTrace>; firstData: boolean } | undefined
 function trackDiagnosticDetails(track: Track, source?: QueueSource): DiagnosticDetails {
   return {
@@ -103,7 +103,7 @@ let positionWrite = Promise.resolve()
 let positionScope: Promise<string | undefined> = Promise.resolve(undefined)
 let lastPositionWrite = 0
 function savePosition(track: Track | null, position: number, duration: number) {
-  if (!track || isMobile || initialPositionPending) return
+  if (!track || isNativeMobile || initialPositionPending) return
   const scope = positionScope
   const observedAt = Date.now()
   const reference = loadedCollectionRef
@@ -114,10 +114,10 @@ function savePosition(track: Track | null, position: number, duration: number) {
 function switchCollectionContext(reference?: string) {
   const state = usePlayerStore.getState()
   if (loadedCollectionRef === reference || !loadedTrackId || state.current?.id !== loadedTrackId) return
-  if (isMobile) void setMobileCollection(loadedTrackId, reference).catch(() => undefined)
+  if (isNativeMobile) void setMobileCollection(loadedTrackId, reference).catch(() => undefined)
   else flushPosition(true)
   loadedCollectionRef = reference
-  if (!isMobile && reference) flushPosition()
+  if (!isNativeMobile && reference) flushPosition()
 }
 
 function recoverPlayback(error: unknown) {
@@ -202,7 +202,7 @@ async function resumeAndroidPlayback(track: Track, valid: () => boolean, positio
 async function ensurePlaying() {
   const state = usePlayerStore.getState()
   if (!state.current || state.status !== 'paused') return
-  if (!isMobile) desktopSleep.dismiss()
+  if (!isNativeMobile) desktopSleep.dismiss()
   const valid = controlScope.begin('transport')
   if (isAndroid) {
     await resumeAndroidPlayback(state.current, valid, initialPositionPending ? requestedStartAt : state.progressSeconds)
@@ -210,11 +210,11 @@ async function ensurePlaying() {
   }
   usePlayerStore.setState({ status: 'playing', error: null })
   try {
-    if (isMobile) await controlMobileAudio('resume')
+    if (isNativeMobile) await controlMobileAudio('resume')
     else if (inDesktopShell) await playerAudio().play()
   } catch (error) {
     if (!valid()) return
-    const snapshot = isMobile ? await snapshotMobileAudio().catch(() => null) : null
+    const snapshot = isNativeMobile ? await snapshotMobileAudio().catch(() => null) : null
     if (valid()) usePlayerStore.setState({ status: snapshot?.id === state.current.id ? snapshot.status as PlaybackStatus : 'paused', error: playbackIssue('audio-control', error, '恢复播放失败') })
   }
 }
@@ -233,7 +233,7 @@ export function resetPlayerForAccount() {
   loadedCollectionRef = undefined
   nativeHistorySession = undefined
   recoveryAttempted = false
-  if (!isMobile) desktopSleep.cancel()
+  if (!isNativeMobile) desktopSleep.cancel()
   if (audio) { audio.pause(); audio.removeAttribute('src'); audio.load() }
   usePlayerStore.setState({ shuffleState:undefined, sleep: noSleep, current: null, queue: [],queueBase:[],queueOrigins:{}, queueSource: undefined, queueFeedback: undefined, queueOpen: false, queueReversed: false, status: 'paused', progressSeconds: 0, durationSeconds: 0, rate: 1, error: null })
   flushPlayerSnapshot()
@@ -241,12 +241,12 @@ export function resetPlayerForAccount() {
     // Stop native playback immediately, even if saving the old position fails.
     await Promise.all([
       positionWrite.catch(() => undefined),
-      isMobile ? controlMobileAudio('stop').catch(() => undefined) : Promise.resolve(),
+      isNativeMobile ? controlMobileAudio('stop').catch(() => undefined) : Promise.resolve(),
     ])
   })().finally(() => { accountResetting = false; accountReset = undefined })
   return accountReset
 }
-export function playbackClock() { if (isMobile) return mobilePlaybackClock(); return audio && loadedTrackId === usePlayerStore.getState().current?.id ? audio.currentTime : usePlayerStore.getState().progressSeconds }
+export function playbackClock() { if (isNativeMobile) return mobilePlaybackClock(); return audio && loadedTrackId === usePlayerStore.getState().current?.id ? audio.currentTime : usePlayerStore.getState().progressSeconds }
 let persistTimer: ReturnType<typeof setTimeout> | undefined
 let pendingSnapshot: { key: string; value: string } | undefined
 let snapshotQueue: Track[] | undefined
@@ -311,7 +311,7 @@ export const usePlayerStore = create<PlayerState>()(persist((set, get) => ({
   play: async (track, startAt, refreshing = false, checkpointAt, originPlayback = false, expired) => {
     track = withTrackTitle(track)
     if (accountResetting) return
-    if (!isMobile && desktopSleep.check()) return
+    if (!isNativeMobile && desktopSleep.check()) return
     const visibilityEpoch=accountEpoch(), sleepRevision = sleepPauseRevision
     if(!useContentVisibility.getState().session) await ensureVisibility()
     if (accountResetting || visibilityEpoch!==accountEpoch() || sleepRevision !== sleepPauseRevision) return
@@ -327,8 +327,8 @@ export const usePlayerStore = create<PlayerState>()(persist((set, get) => ({
     const eligible = (candidate:Track) => entryAllowed(candidate, queueTrackOrigins(get(), candidate), useContentVisibility.getState().rules)
     if (!refreshing && !eligible(track)) { await get().next(); return }
     const previous = get()
-    if (!isMobile && previous.sleep.expired) desktopSleep.dismiss()
-    if (!isMobile && !refreshing && startAt === undefined && checkpointAt === undefined && unloadedDesktopSeek?.trackId === track.id) {
+    if (!isNativeMobile && previous.sleep.expired) desktopSleep.dismiss()
+    if (!isNativeMobile && !refreshing && startAt === undefined && checkpointAt === undefined && unloadedDesktopSeek?.trackId === track.id) {
       startAt = unloadedDesktopSeek.seconds
     }
     unloadedDesktopSeek = undefined
@@ -343,7 +343,7 @@ export const usePlayerStore = create<PlayerState>()(persist((set, get) => ({
     }
     loadedTrackId = null
     initialPositionPending = false
-    if (!isMobile) positionScope = playbackPositionScope()
+    if (!isNativeMobile) positionScope = playbackPositionScope()
     if (audio) { audio.pause(); audio.removeAttribute('src'); audio.load() }
     if (!refreshing) playbackTrace = undefined
     const trace = diagnosticTrace(track, previous.queueSource)
@@ -355,7 +355,7 @@ export const usePlayerStore = create<PlayerState>()(persist((set, get) => ({
     let recordingTrack = false
     try {
       if (track.resolveParts) {
-        if (isMobile && previous.current) await controlMobileAudio('pause').catch(() => undefined)
+        if (isNativeMobile && previous.current) await controlMobileAudio('pause').catch(() => undefined)
         const parts = await resolveSeasonEntry(track)
         if (request !== playRequest) return
         if (parts.length) {
@@ -378,7 +378,7 @@ export const usePlayerStore = create<PlayerState>()(persist((set, get) => ({
       trace.emit('track-record', 'started')
       const [recordedTrack, , resumeAt] = await Promise.all([
         recordPlayedTrack(track),
-        isMobile ? prepareMobileAudio(track) : Promise.resolve(),
+        isNativeMobile ? prepareMobileAudio(track) : Promise.resolve(),
         startAt ?? checkpointAt ?? positionWrite.then(() => readPlaybackPosition(track.id)),
       ])
       if (request !== playRequest) return
@@ -397,8 +397,8 @@ export const usePlayerStore = create<PlayerState>()(persist((set, get) => ({
       set({ current: storedTrack, queue, queueBase, durationSeconds: storedTrack.durationSeconds, progressSeconds: desktopSeekRevision !== seekRevision ? get().progressSeconds : 0 })
       const [plan] = await Promise.all([
         getTrackPlaybackPlan(storedTrack, refreshing || previous.status === 'error', false, useOfflinePlayback.getState().offline),
-        isMobile ? ensureNativeReady().then(async () => {
-          if (!isMobile || request !== playRequest) return
+        isNativeMobile ? ensureNativeReady().then(async () => {
+          if (!isNativeMobile || request !== playRequest) return
           const state = get()
           await syncNativeQueue(state.queue, state.repeatMode, state.shuffled, state.resumeThresholdSeconds, state.queueSource)
         }) : Promise.resolve(),
@@ -413,7 +413,7 @@ export const usePlayerStore = create<PlayerState>()(persist((set, get) => ({
       trace.update({ source: plan.source, codec: plan.codec, requestedQuality: plan.requestedQuality, actualQuality: plan.actualQuality })
       trace.emit('source', 'succeeded')
       trace.emit('start', 'started')
-      if (isMobile) {
+      if (isNativeMobile) {
         loadedTrackId = storedTrack.id
         initialPositionPending = position > 0
         await playMobileAudio(storedTrack, plan.url, position, get().volume, true, loadedCollectionRef, get().rate, false, plan.upgradeUrl, resumePolicy, plan.loudnessGainDb, trace.operation)
@@ -451,7 +451,7 @@ export const usePlayerStore = create<PlayerState>()(persist((set, get) => ({
           await get().play(next, undefined, false, undefined, true, rejected)
           return
         }
-        if (isMobile) await controlMobileAudio('pause').catch(() => undefined)
+        if (isNativeMobile) await controlMobileAudio('pause').catch(() => undefined)
         if (request === playRequest) set({ status: 'error', error: playbackIssue('audio-source', error, 'B 站视频已失效') })
         return
       }
@@ -463,7 +463,7 @@ export const usePlayerStore = create<PlayerState>()(persist((set, get) => ({
         await get().next(true)
         return
       }
-      if (isMobile) {
+      if (isNativeMobile) {
         const action = get().sleep.deadline ? 'pause' : 'stop'
         await controlMobileAudio(action).catch(() => undefined)
         if (request !== playRequest) return
@@ -473,7 +473,7 @@ export const usePlayerStore = create<PlayerState>()(persist((set, get) => ({
   },
   playFromList: async (tracks, trackId, queueSource, startAt, resumeCheckpoint = false) => {
     if (accountResetting) return
-    if (!isMobile && desktopSleep.check()) return
+    if (!isNativeMobile && desktopSleep.check()) return
     const visibilityEpoch=accountEpoch(), sleepRevision = sleepPauseRevision
     if(!useContentVisibility.getState().session) await ensureVisibility()
     if (accountResetting || visibilityEpoch!==accountEpoch() || sleepRevision !== sleepPauseRevision) return
@@ -547,16 +547,16 @@ export const usePlayerStore = create<PlayerState>()(persist((set, get) => ({
   reverseQueue: () => { ++queueIntent; set(state=>({queue:[...state.queue].reverse(),queueBase:[...(state.queueBase??state.queue)].reverse(),queueReversed:!state.queueReversed})) },
   moveInQueue: (id, direction) => { ++queueIntent; set(state => { const next = [...state.queue]; const index = next.findIndex((track) => track.id === id); const target = index + direction; if (index < 0 || target < 0 || target >= next.length) return {}; [next[index], next[target]] = [next[target], next[index]]; return { queue: next,queueBase:reorderVisibleBase(state,next) } }) },
   toggle: async () => {
-    if (!isMobile && desktopSleep.check()) return
+    if (!isNativeMobile && desktopSleep.check()) return
     const { current, status } = get(); if (!current) return
-    if (!isMobile && (status === 'paused' || status === 'error')) desktopSleep.dismiss()
+    if (!isNativeMobile && (status === 'paused' || status === 'error')) desktopSleep.dismiss()
     const valid = controlScope.begin('transport')
     const failed = (error: unknown) => { if (valid()) set({ error: playbackIssue('audio-control', error, '无法控制播放，请重试') }) }
     // A newly opened player reads the same database checkpoint as selecting a
     // song. Only recovery of an interrupted attempt uses the live position.
     const resumeAt = () => status === 'error' ? initialPositionPending || loadedTrackId !== current.id ? requestedStartAt : Math.max(0, get().progressSeconds) : undefined
     if (!inDesktopShell) { set({ status: status === 'playing' ? 'paused' : 'playing' }); return }
-    if (isMobile) {
+    if (isNativeMobile) {
       if (status === 'resolving') {
         ++playRequest
         loadedTrackId = null; initialPositionPending = false
@@ -608,8 +608,8 @@ export const usePlayerStore = create<PlayerState>()(persist((set, get) => ({
   toggleQueue: () => set(({ queueOpen }) => ({ queueOpen: !queueOpen })),
   next: async (fromEnded = false) => {
     if (accountResetting) return
-    if (!isMobile && (desktopSleep.check() || fromEnded && get().sleep.expired)) return
-    if (isMobile && nativeAutonomousQueue && !fromEnded) { await nativeTransport('next'); return }
+    if (!isNativeMobile && (desktopSleep.check() || fromEnded && get().sleep.expired)) return
+    if (isNativeMobile && nativeAutonomousQueue && !fromEnded) { await nativeTransport('next'); return }
     const { current, queue, shuffled, repeatMode } = get()
     if (fromEnded) { savePosition(current, 0, 0); loadedTrackId = null }
     if (fromEnded && repeatMode === 'one' && current && queue.some(t=>t.id===current.id)) { await get().play(current, 0,false,undefined,true); return }
@@ -623,9 +623,9 @@ export const usePlayerStore = create<PlayerState>()(persist((set, get) => ({
   },
   previous: async () => {
     if (accountResetting) return
-    if (isMobile && nativeAutonomousQueue) { await nativeTransport('previous'); return }
+    if (isNativeMobile && nativeAutonomousQueue) { await nativeTransport('previous'); return }
     const { current, queue, progressSeconds, shuffled } = get()
-    if (progressSeconds > 4 && (isMobile || !queue.length)) { get().seek(0); return }
+    if (progressSeconds > 4 && (isNativeMobile || !queue.length)) { get().seek(0); return }
     if (!queue.length) return
     const id = shuffled ? shuffleDeck.target(shuffleItems(queue),current?.id ?? '',-1) : orderedQueueTarget(queueEntryOrder(get().queueBase??queue),queue.map(t=>t.id),current?.id??'',-1,true)
     if (shuffled) set({ shuffleState:shuffleDeck.snapshot() })
@@ -638,19 +638,19 @@ export const usePlayerStore = create<PlayerState>()(persist((set, get) => ({
     const state = get()
     desktopSeekRevision += 1
     const target = Math.max(0, Math.min(seconds, state.durationSeconds || seconds))
-    if (isMobile) void controlMobileAudio('seek', target).catch(error => { if (valid()) nativeError(error) })
+    if (isNativeMobile) void controlMobileAudio('seek', target).catch(error => { if (valid()) nativeError(error) })
     else if (audio && loadedTrackId === state.current?.id) audio.currentTime = target
     else if (state.current && state.status !== 'resolving') unloadedDesktopSeek = { trackId: state.current.id, seconds: target }
     set({ progressSeconds: target })
   },
-  setVolume: (volume) => { const valid = controlScope.begin('volume'); const normalized = Math.max(0, Math.min(1, volume)); if (isMobile) void controlMobileAudio('volume', normalized).catch(error => { if (valid()) nativeError(error) }); else { playerAudio(); set({ volume: normalized }); applyDesktopOutput(); return }; set({ volume: normalized }) },
+  setVolume: (volume) => { const valid = controlScope.begin('volume'); const normalized = Math.max(0, Math.min(1, volume)); if (isNativeMobile) void controlMobileAudio('volume', normalized).catch(error => { if (valid()) nativeError(error) }); else { playerAudio(); set({ volume: normalized }); applyDesktopOutput(); return }; set({ volume: normalized }) },
   setRate: async rate => {
     if (!playbackRates.some(option => option === rate) || rate === get().rate) return
     const valid = controlScope.begin('rate')
     const previous = get().rate
     set({ rate })
     try {
-      if (isMobile && loadedTrackId) await controlMobileAudio('rate', rate)
+      if (isNativeMobile && loadedTrackId) await controlMobileAudio('rate', rate)
       else if (audio) audio.playbackRate = rate
     } catch {
       if (valid()) set({ rate: previous, error: playbackIssue('audio-control', null, '当前无法调整播放速度，请重试') })
@@ -694,7 +694,7 @@ export const usePlayerStore = create<PlayerState>()(persist((set, get) => ({
     snapshotQueue = queue; snapshotCurrent = current?.id
     const base = queueBase ?? queue
     const storedQueue = useOfflinePlayback.getState().offline ? queueForOfflineSnapshot(queue, base) : queue
-    return { ...packQueueBase(storedQueue,base),queueOrigins,shuffleState:isMobile ? undefined : shuffleState, current, queue: storedQueue, queueSource, queueReversed, progressSeconds, durationSeconds, volume, shuffled, repeatMode, resumeThresholdSeconds }
+    return { ...packQueueBase(storedQueue,base),queueOrigins,shuffleState:isNativeMobile ? undefined : shuffleState, current, queue: storedQueue, queueSource, queueReversed, progressSeconds, durationSeconds, volume, shuffled, repeatMode, resumeThresholdSeconds }
   },
 }))
 
@@ -718,7 +718,7 @@ const desktopSleep = createDesktopSleepTimer(
   },
 )
 
-if (!isMobile) {
+if (!isNativeMobile) {
   window.addEventListener('focus', () => desktopSleep.check())
   if (typeof document !== 'undefined') document.addEventListener('visibilitychange', () => desktopSleep.check())
 }
@@ -738,7 +738,7 @@ function flushPosition(notify = false) {
   const state = usePlayerStore.getState()
   if (state.current && loadedTrackId === state.current.id) {
     savePosition(state.current, playbackClock(), state.durationSeconds)
-    if (notify && !isMobile) {
+    if (notify && !isNativeMobile) {
       void positionScope.then(scope => scope === undefined ? undefined : positionWrite.then(() => window.dispatchEvent(new Event('bilimusic-data-changed'))))
     }
   }
@@ -747,7 +747,7 @@ if (typeof document !== 'undefined') document.addEventListener('visibilitychange
 usePlayerStore.subscribe((state, previous) => {
   if (state.current?.id !== previous.current?.id && typeof sessionStorage !== 'undefined') sessionStorage.removeItem('lyrics-subtitles-override')
   if (state.shuffled !== previous.shuffled || !state.queue.length) shuffleDeck.reset()
-  if ((!isMobile || !nativeAutonomousQueue) && state.shuffled && (state.queue !== previous.queue || state.current?.id !== previous.current?.id || !previous.shuffled)) {
+  if ((!isNativeMobile || !nativeAutonomousQueue) && state.shuffled && (state.queue !== previous.queue || state.current?.id !== previous.current?.id || !previous.shuffled)) {
     shuffleDeck.observe(shuffleItems(state.queue),state.current?.id ?? '')
     usePlayerStore.setState({ shuffleState:shuffleDeck.snapshot() })
   }
@@ -764,7 +764,7 @@ usePlayerStore.subscribe((state, previous) => {
       if (recoveryAttempted && previous.status !== 'paused') trace.emit('recovery', 'succeeded')
     }
   }
-  if (isMobile) return
+  if (isNativeMobile) return
   if (state.status === 'paused' && previous.status !== 'paused' && state.current?.id === previous.current?.id) flushPosition(true)
   else if (state.status === 'playing' && (previous.status !== 'playing' ||
     (state.progressSeconds !== previous.progressSeconds && Date.now() - lastPositionWrite >= 15_000))) flushPosition()
@@ -877,7 +877,7 @@ function onNativeState(state: Awaited<ReturnType<typeof snapshotMobileAudio>> & 
 }
 let nativeReady: Promise<void> | undefined
 function ensureNativeReady() {
-  if (!isMobile) return Promise.resolve()
+  if (!isNativeMobile) return Promise.resolve()
   return nativeReady ??= observeMobileAudio(onNativeState)
     .then(async () => onNativeState(await snapshotMobileAudio()))
     .catch(error => { nativeReady = undefined; throw error })
@@ -900,14 +900,14 @@ async function reconcileMobilePlayback(rebind = false, foreground = false) {
     nativeError(error)
   } finally { reconciliationPending = false; if (foregroundPending) { foregroundPending = false; window.dispatchEvent(new Event('bilimusic-playback-reconciled')) } }
 }
-if (isMobile) {
+if (isNativeMobile) {
   const resume = () => { if (!document.hidden) void reconcileMobilePlayback(isIOS && iosListenerAge() > 2_000, true) }
   document.addEventListener('visibilitychange', resume)
   window.addEventListener('pageshow', resume)
   window.addEventListener('focus', resume)
 }
 let lastNativePollAt = 0
-if (isMobile) window.setInterval(() => {
+if (isNativeMobile) window.setInterval(() => {
   if (document.hidden) return
   const state = usePlayerStore.getState()
   if (state.status === 'playing') {
@@ -985,7 +985,7 @@ useOfflinePlayback.subscribe((state, previous) => {
   if (state.offline !== previous.offline || state.library !== previous.library) reprojectVisibility(state.offline !== previous.offline)
 })
 useContentVisibility.subscribe((state,previous)=>{if(state.rules!==previous.rules && state.session) reprojectVisibility()})
-if (isMobile) usePlayerStore.subscribe((state, previous) => {
+if (isNativeMobile) usePlayerStore.subscribe((state, previous) => {
   if (state.queue !== previous.queue || state.repeatMode !== previous.repeatMode || state.shuffled !== previous.shuffled || state.resumeThresholdSeconds !== previous.resumeThresholdSeconds || state.queueSource !== previous.queueSource) {
     nativeQueuePending = ensureNativeReady().then(() => {
       const current = usePlayerStore.getState()
@@ -997,7 +997,7 @@ if (isMobile) usePlayerStore.subscribe((state, previous) => {
 
 // A recreated WebView must mirror its restored/adopted queue even before the
 // user edits it. Read the native snapshot first to retain background advances.
-if (isMobile) { nativeQueuePending = ensureNativeReady().then(() => {
+if (isNativeMobile) { nativeQueuePending = ensureNativeReady().then(() => {
   const state = usePlayerStore.getState()
   return syncNativeQueue(state.queue, state.repeatMode, state.shuffled, state.resumeThresholdSeconds, state.queueSource)
 });void nativeQueuePending.catch(error => console.warn('BiliMusic: initial queue update failed', error)) }
@@ -1038,7 +1038,7 @@ export async function reloadCurrentAudioSource() {
     const plan = await getTrackPlaybackPlan(track, true, true, useOfflinePlayback.getState().offline)
     trace.update({ source: plan.source, codec: plan.codec, requestedQuality: plan.requestedQuality, actualQuality: plan.actualQuality })
     if (!valid()) { trace.emit('quality-switch', 'cancelled'); return }
-    if (isMobile) {
+    if (isNativeMobile) {
       const state = usePlayerStore.getState()
       await playMobileAudio(track, plan.url, playbackClock(), state.volume, state.status === 'playing' || state.status === 'buffering', loadedCollectionRef, state.rate, true, undefined, undefined, plan.loudnessGainDb)
     } else {

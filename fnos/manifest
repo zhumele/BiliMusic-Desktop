@@ -1,0 +1,17 @@
+appname               = bilimusic
+version               = 0.4.4
+display_name          = BiliMusic
+desc                  = 播放 B 站音乐与合集的桌面级音乐播放器：搜索、收藏、歌单、歌词与播放队列。应用以普通权限运行，浏览器与飞牛桌面均可访问，并适配手机页面。
+platform              = x86
+source                = thirdparty
+category              = media
+maintainer            = zhumele
+maintainer_url        = https://github.com/zhumele/BiliMusic-Desktop
+distributor           = zhumele
+distributor_url       = https://github.com/zhumele/BiliMusic-Desktop
+desktop_uidir         = ui
+desktop_applaunchname = bilimusic.Application
+service_port          = 8899
+checkport             = false
+ctl_stop              = true
+changelog             = 首个飞牛版本：以 Web 服务方式运行，复用桌面端同一套功能，支持飞牛桌面入口与手机浏览器访问。

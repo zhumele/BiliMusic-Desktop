@@ -134,8 +134,8 @@ pub fn collection_progress(
 }
 
 #[tauri::command]
-pub fn playback_position(
-    app: tauri::AppHandle,
+pub fn playback_position<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     database: State<'_, Database>,
     track_id: String,
     seconds: Option<f64>,
@@ -554,8 +554,8 @@ pub async fn bili_warm_playback(
 }
 
 #[tauri::command]
-pub async fn bili_video_source(
-    app: tauri::AppHandle,
+pub async fn bili_video_source<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     database: State<'_, Database>,
     provider: State<'_, BilibiliProvider>,
     media_proxy: State<'_, MediaProxy>,

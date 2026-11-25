@@ -12,6 +12,11 @@ pub fn account_session(c: &Connection) -> rusqlite::Result<String> {
 impl Database {
     pub fn open(app: &AppHandle) -> Result<Self, Box<dyn std::error::Error>> {
         let data_dir = app.path().app_data_dir()?;
+        Self::open_at(data_dir)
+    }
+
+    /// 按指定目录打开数据库（fnOS / 浏览器模式使用）。
+    pub fn open_at(data_dir: std::path::PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
         std::fs::create_dir_all(&data_dir)?;
         crate::sync::request_budget::initialize(&data_dir);
         let profile = std::fs::read_to_string(data_dir.join("active-profile")).unwrap_or_default();

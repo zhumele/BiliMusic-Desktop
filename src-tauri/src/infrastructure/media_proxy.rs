@@ -96,6 +96,20 @@ impl MediaProxy {
             .map(Arc::new);
         Self::start_inner(cache, Some(app)).await
     }
+    /// 按指定数据目录启动（fnOS / 浏览器模式使用，无需 AppHandle）。
+    pub async fn start_at(data_dir: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let cache = PlaybackCache::open(
+            data_dir.join("playback-v1"),
+            data_dir.join("playback-cache.json"),
+        )
+        .ok()
+        .map(Arc::new);
+        Self::start_inner(cache, None).await
+    }
+    /// 当前监听地址（用于把返回给前端的媒体 URL 改写为同源）。
+    pub async fn base_url(&self) -> String {
+        self.server.lock().await.base_url.clone()
+    }
     async fn start_inner(
         cache: Option<Arc<PlaybackCache>>,
         app: Option<tauri::AppHandle>,
@@ -444,7 +458,8 @@ impl MediaProxy {
         duration_seconds: i64,
         codecs: &str,
     ) -> String {
-        if cfg!(any(target_os = "ios", target_os = "macos"))
+        // 网页/浏览器模式（server feature）由浏览器解码，不能输出仅供 AVFoundation 使用的 HLS。
+        if cfg!(all(any(target_os = "ios", target_os = "macos"), not(feature = "server")))
             && super::fragmented_mp4::prefer_segmented(duration_seconds, codecs)
         {
             match self.segmented_mp4(&url).await {
@@ -469,7 +484,8 @@ impl MediaProxy {
         duration_seconds: i64,
         codecs: &str,
     ) -> String {
-        if cfg!(any(target_os = "ios", target_os = "macos"))
+        // 网页/浏览器模式（server feature）由浏览器解码，不能输出仅供 AVFoundation 使用的 HLS。
+        if cfg!(all(any(target_os = "ios", target_os = "macos"), not(feature = "server")))
             && super::fragmented_mp4::prefer_segmented(duration_seconds, codecs)
         {
             let id = url.rsplit('/').next().unwrap_or_default();
@@ -1749,7 +1765,8 @@ mod tests {
             .platform_upgrade_url(raw.clone(), 17325, "mp4a.40.2")
             .await;
         assert_eq!(requests.load(Ordering::Relaxed), 0);
-        if cfg!(any(target_os = "ios", target_os = "macos")) {
+        // 网页/浏览器模式（server feature）由浏览器解码，不能输出仅供 AVFoundation 使用的 HLS。
+        if cfg!(all(any(target_os = "ios", target_os = "macos"), not(feature = "server"))) {
             assert!(upgrade.ends_with("/index.m3u8"));
             let client = Client::builder().no_proxy().build().unwrap();
             let lazy_guard = proxy.guard_upgrade(&upgrade, 0).await;

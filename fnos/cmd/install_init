@@ -1,0 +1,6 @@
+#!/bin/bash
+set -e
+# 应用以包用户运行（config/privilege 为 run-as: package）。安装阶段 TRIM_PKGVAR
+# 可能尚未创建，且其上级目录归 root 所有，这里不做任何写入，避免安装中止。
+# 数据目录由 cmd/main 启动时创建。
+exit 0

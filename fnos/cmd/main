@@ -1,0 +1,107 @@
+#!/bin/bash
+# 飞牛应用启停脚本：bilimusic-server 以普通权限（run-as: package）运行。
+set -u
+
+PKG_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+if [ -n "${TRIM_APPDEST:-}" ]; then
+  APP_DIR="$TRIM_APPDEST"
+else
+  APP_DIR="$PKG_DIR/app"
+fi
+
+DATA_DIR="${TRIM_PKGVAR:-$PKG_DIR/var}"
+PORT="${TRIM_SERVICE_PORT:-8899}"
+PID_FILE="$DATA_DIR/app.pid"
+LOG_FILE="$DATA_DIR/info.log"
+LOG_MAX_BYTES=2097152
+BIN="$APP_DIR/bin/bilimusic-server"
+WEB_DIR="$APP_DIR/web"
+
+mkdir -p "$DATA_DIR"
+
+log_msg() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
+}
+
+is_running() {
+  if [ -f "$PID_FILE" ]; then
+    pid="$(head -n 1 "$PID_FILE" | tr -d '[:space:]')"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      return 0
+    fi
+    rm -f "$PID_FILE"
+  fi
+  return 1
+}
+
+start_process() {
+  if is_running; then
+    return 0
+  fi
+  if [ ! -x "$BIN" ]; then
+    log_msg "启动失败：未找到可执行文件 $BIN"
+    [ -n "${TRIM_TEMP_LOGFILE:-}" ] && echo "BiliMusic 缺少可执行文件 $BIN" >> "$TRIM_TEMP_LOGFILE"
+    return 1
+  fi
+  if [ ! -f "$WEB_DIR/index.html" ]; then
+    log_msg "启动失败：未找到前端资源 $WEB_DIR/index.html"
+    [ -n "${TRIM_TEMP_LOGFILE:-}" ] && echo "BiliMusic 缺少前端资源 $WEB_DIR/index.html" >> "$TRIM_TEMP_LOGFILE"
+    return 1
+  fi
+  if [ -f "$LOG_FILE" ] && [ "$(wc -c < "$LOG_FILE")" -gt "$LOG_MAX_BYTES" ]; then
+    mv -f "$LOG_FILE" "$LOG_FILE.1"
+  fi
+  log_msg "启动 BiliMusic（端口 $PORT，数据目录 $DATA_DIR）"
+  cd "$DATA_DIR" || return 1
+  BILIMUSIC_HOST=0.0.0.0 \
+  BILIMUSIC_PORT="$PORT" \
+  BILIMUSIC_DATA_DIR="$DATA_DIR" \
+  BILIMUSIC_WEB_DIR="$WEB_DIR" \
+  nohup "$BIN" >> "$LOG_FILE" 2>&1 &
+  echo $! > "$PID_FILE"
+  sleep 1
+  if ! is_running; then
+    log_msg "启动失败，最近日志："
+    tail -n 20 "$LOG_FILE" >> "$LOG_FILE"
+    [ -n "${TRIM_TEMP_LOGFILE:-}" ] && tail -n 20 "$LOG_FILE" >> "$TRIM_TEMP_LOGFILE"
+    rm -f "$PID_FILE"
+    return 1
+  fi
+  return 0
+}
+
+stop_process() {
+  if is_running; then
+    pid="$(head -n 1 "$PID_FILE" | tr -d '[:space:]')"
+    log_msg "停止 BiliMusic（PID $pid）"
+    kill -TERM "$pid" 2>/dev/null
+    count=0
+    while kill -0 "$pid" 2>/dev/null && [ "$count" -lt 10 ]; do
+      sleep 1
+      count=$((count + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null
+    fi
+  fi
+  rm -f "$PID_FILE"
+  return 0
+}
+
+case "${1:-}" in
+  start)
+    start_process
+    ;;
+  stop)
+    stop_process
+    ;;
+  status)
+    if is_running; then
+      exit 0
+    fi
+    exit 3
+    ;;
+  *)
+    exit 1
+    ;;
+esac

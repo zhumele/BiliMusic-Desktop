@@ -17,6 +17,8 @@ mod native_playback;
 #[cfg(target_env = "ohos")]
 mod ohos_playback;
 mod sync;
+#[cfg(feature = "server")]
+pub mod server;
 #[cfg(desktop)]
 mod tray_player;
 mod window_lifecycle;
@@ -81,8 +83,8 @@ pub fn run() {
     );
     let builder = builder.plugin(tauri_plugin_store::Builder::default().build());
 
-    builder
-        .setup(|app| {
+    let builder = register_commands(builder);
+    let builder = builder.setup(|app| {
             use infrastructure::diagnostics::{Diagnostics, Outcome, Step};
             let diagnostics = Diagnostics::open(app.path().app_data_dir()?.join("diagnostics-v1"));
             diagnostics.begin_startup();
@@ -141,8 +143,51 @@ pub fn run() {
                 interface::diagnostics::observe_windows_webview(webview, diagnostics);
             }
             Ok(())
+        });
+    builder
+        .on_window_event(|window, event| {
+            #[cfg(desktop)]
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    // Keep the main WebView alive when hiding; otherwise exit the
+                    // whole application, including lyrics and the tray icon.
+                    api.prevent_close();
+                    let window = window.clone();
+                    tauri::async_runtime::spawn(async move {
+                        window_lifecycle::close_main(&window);
+                    });
+                }
+            }
+            #[cfg(mobile)]
+            let _ = (window, event);
         })
-        .invoke_handler(tauri::generate_handler![
+        .build(tauri::generate_context!())
+        .expect("failed to build BiliMusic")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                if let Some(diagnostics) = app.try_state::<infrastructure::diagnostics::Diagnostics>() {
+                    diagnostics.flush_on_exit();
+                }
+            }
+            #[cfg(desktop)]
+            if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+                floating_lyrics::remember_placement(app);
+            }
+            #[cfg(target_os = "macos")]
+            if matches!(event, tauri::RunEvent::Reopen { .. }) {
+                show_main_window(app);
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app, event);
+        });
+}
+
+/// 桌面端命令注册表（含窗口/托盘等仅桌面可用的命令）。
+#[cfg(not(feature = "server"))]
+pub fn register_commands(
+    builder: tauri::Builder<tauri::Wry>,
+) -> tauri::Builder<tauri::Wry> {
+    builder.invoke_handler(tauri::generate_handler![
             interface::playback_cache::playback_cache_status,
             interface::playback_cache::offline_playable_tracks,
             interface::playback_cache::playback_cache_limit,
@@ -313,40 +358,118 @@ pub fn run() {
             interface::commands::downloads_list,
             interface::commands::download_remove,
             interface::commands::download_track,
-        ])
-        .on_window_event(|window, event| {
-            #[cfg(desktop)]
-            if window.label() == "main" {
-                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                    // Keep the main WebView alive when hiding; otherwise exit the
-                    // whole application, including lyrics and the tray icon.
-                    api.prevent_close();
-                    let window = window.clone();
-                    tauri::async_runtime::spawn(async move {
-                        window_lifecycle::close_main(&window);
-                    });
-                }
-            }
-            #[cfg(mobile)]
-            let _ = (window, event);
-        })
-        .build(tauri::generate_context!())
-        .expect("failed to build BiliMusic")
-        .run(|app, event| {
-            if matches!(event, tauri::RunEvent::Exit) {
-                if let Some(diagnostics) = app.try_state::<infrastructure::diagnostics::Diagnostics>() {
-                    diagnostics.flush_on_exit();
-                }
-            }
-            #[cfg(desktop)]
-            if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
-                floating_lyrics::remember_placement(app);
-            }
-            #[cfg(target_os = "macos")]
-            if matches!(event, tauri::RunEvent::Reopen { .. }) {
-                show_main_window(app);
-            }
-            #[cfg(not(target_os = "macos"))]
-            let _ = (app, event);
-        });
+    ])
+}
+
+/// Web 服务（fnOS）使用的命令注册表。
+///
+/// 只注册不依赖真实窗口/托盘/系统快捷键的命令；桌面专属能力由前端 shim 兜底。
+#[cfg(feature = "server")]
+pub fn register_commands<R: tauri::Runtime>(
+    builder: tauri::Builder<R>,
+) -> tauri::Builder<R> {
+    builder.invoke_handler(tauri::generate_handler![
+        interface::playback_cache::playback_cache_status,
+        interface::playback_cache::offline_playable_tracks,
+        interface::playback_cache::playback_cache_limit,
+        interface::playback_cache::playback_cache_clear,
+        interface::playlist_import::external_playlist_read,
+        interface::playlist_import::playlist_import_scope,
+        interface::playlist_import::playlist_import_archive,
+        interface::playlist_import::playlist_import_commit,
+        interface::imported_entries::playlist_import_entries,
+        interface::imported_entries::playlist_import_contexts,
+        interface::imported_entries::playlist_import_seed,
+        interface::imported_entries::playlist_import_bind,
+        interface::imported_entries::playlist_import_remove_missing,
+        interface::media::bili_creator_catalog,
+        interface::commands::collections_list,
+        interface::commands::collections_change,
+        interface::commands::collections_import_seasons,
+        sync::sync_status,
+        interface::visibility::content_visibility,
+        interface::visibility::content_visibility_save,
+        interface::chapters::get_saved_chapters,
+        interface::chapters::save_chapters,
+        interface::list_preferences::list_preferences,
+        interface::list_preferences::list_preferences_save,
+        interface::commands::app_health,
+        interface::diagnostics::diagnostics_record,
+        interface::diagnostics::diagnostics_recent,
+        interface::diagnostics::diagnostics_clear,
+        interface::diagnostics::diagnostics_ready,
+        interface::commands::library_summary,
+        interface::commands::library_record_play,
+        interface::commands::library_save_track,
+        interface::commands::track_playback_url,
+        interface::commands::track_playback_plan,
+        interface::commands::playlist_rename,
+        interface::commands::library_tracks,
+        interface::commands::library_recent,
+        interface::commands::playback_position,
+        interface::commands::collection_progress,
+        interface::commands::library_toggle_favorite,
+        interface::commands::library_update_metadata,
+        interface::commands::bili_search,
+        interface::commands::bili_search_suggestions,
+        interface::commands::search_history_list,
+        interface::commands::search_history_clear,
+        interface::commands::playlists_list,
+        interface::commands::playlist_create,
+        interface::commands::playlist_tracks,
+        interface::commands::playlist_add_track,
+        interface::commands::playlist_add_tracks,
+        interface::commands::playlist_remove_track,
+        interface::commands::playlist_remove_tracks,
+        interface::commands::playlist_delete,
+        interface::media::bili_season,
+        interface::media::bili_season_cover,
+        interface::media::bili_video_chapters,
+        interface::media::bili_subtitles,
+        interface::media::bili_subtitle_lines,
+        interface::media::bili_media_options,
+        interface::media::media_preferences,
+        interface::media::media_set_preferences,
+        interface::media::listening_scope,
+        interface::media::listening_record,
+        interface::media::listening_statistics,
+        interface::media::listening_hydrate_tags,
+        interface::commands::bili_video_parts,
+        interface::commands::bili_video_pagelist,
+        interface::commands::bili_playback_source,
+        interface::commands::bili_video_source,
+        interface::commands::bili_warm_playback,
+        interface::commands::bili_danmaku,
+        interface::commands::bili_qr_login_generate,
+        interface::commands::bili_qr_login_poll,
+        interface::commands::bili_account_profile,
+        interface::commands::bili_favorite_folders,
+        interface::commands::bili_subscribed_seasons,
+        interface::commands::bili_favorite_videos,
+        interface::linked_folders::bili_linked_folder,
+        interface::linked_folders::bili_linked_matched_covers,
+        interface::linked_folders::bili_linked_create,
+        interface::linked_folders::bili_linked_refresh,
+        interface::linked_folders::bili_linked_change,
+        interface::linked_folders::bili_linked_remove_selected,
+        interface::linked_folders::bili_linked_unlink,
+        interface::commands::bili_logout,
+        interface::commands::bili_comments,
+        interface::commands::bili_comment_emotes,
+        interface::commands::bili_comment_replies,
+        interface::commands::bili_comment_reply_page,
+        interface::commands::bili_comment_like,
+        interface::commands::bili_comment_reply,
+        interface::commands::lyrics_search,
+        interface::commands::metadata_catalog_search,
+        interface::commands::account_session,
+        interface::commands::lyrics_get,
+        interface::commands::lyrics_complete_selected,
+        interface::commands::lyrics_restore_selected,
+        interface::commands::lyrics_save,
+        interface::commands::lyrics_save_with_metadata,
+        interface::commands::lyrics_set_bias,
+        interface::commands::downloads_list,
+        interface::commands::download_remove,
+    ])
 }

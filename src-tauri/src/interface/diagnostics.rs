@@ -231,7 +231,7 @@ pub async fn diagnostics_clear(
 }
 
 #[tauri::command]
-pub fn diagnostics_ready(_app: tauri::AppHandle, diagnostics: State<'_, Diagnostics>) {
+pub fn diagnostics_ready<R: tauri::Runtime>(_app: tauri::AppHandle<R>, diagnostics: State<'_, Diagnostics>) {
     if !diagnostics.webview_ready() {
         return;
     }

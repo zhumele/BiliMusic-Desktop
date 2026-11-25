@@ -38,3 +38,12 @@ __pycache__/
 /src-tauri/vendor/tao/Cargo.lock
 
 /dist-large-screen/
+
+# fnOS（飞牛）打包的中间产物
+/target-linux/
+/.cargo-linux/
+/dist-fpk/
+/tools/fnpack
+/fnos/app/bin/
+/fnos/app/web/
+

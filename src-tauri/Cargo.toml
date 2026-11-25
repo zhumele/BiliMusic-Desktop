@@ -10,6 +10,16 @@ license = "MIT"
 name = "bilimusic_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[[bin]]
+name = "bilimusic-server"
+path = "src/bin/bilimusic-server.rs"
+required-features = ["server"]
+
+[features]
+default = []
+# fnOS / 浏览器模式：用 Tauri MockRuntime 承载无窗口 App，通过 HTTP 暴露命令。
+server = ["tauri/test"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -29,7 +39,7 @@ thiserror = "2"
 rusqlite = { version = "0.37", features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "cookies", "stream", "gzip", "brotli", "deflate"] }
 flate2 = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "fs", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "fs", "io-util", "macros", "signal"] }
 tokio-util = { version = "0.7", features = ["io"] }
 url = "2"
 axum = "0.8"

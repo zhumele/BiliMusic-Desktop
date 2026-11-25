@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import { Clock3, ChevronRight, Minus, Plus } from 'lucide-react'
 import { commandErrorMessage } from '../../services/desktopApi'
 import { formatDuration } from '../../shared/time'
-import { isMobile } from '../../services/platform'
+import { isNativeMobile } from '../../services/platform'
 import { CollectionDialog } from '../../shared/CollectionDialog'
 import { controlMobileAudio } from './mobileAudio'
 import { controlDesktopSleep, usePlayerStore } from './playerStore'
@@ -24,7 +24,7 @@ export function SleepTimer({ open, onClose }: { open: boolean; onClose: () => vo
   }, [open, sleep.deadline])
   const action = async (command: Parameters<typeof controlDesktopSleep>[0], value?: number) => {
     setError(''); setBusy(true)
-    try { await (isMobile ? controlMobileAudio(command, value) : controlDesktopSleep(command, value)); onClose() }
+    try { await (isNativeMobile ? controlMobileAudio(command, value) : controlDesktopSleep(command, value)); onClose() }
     catch (cause) { setError(commandErrorMessage(cause)) }
     finally { setBusy(false) }
   }

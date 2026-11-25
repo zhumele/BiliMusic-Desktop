@@ -1,0 +1,10 @@
+#!/bin/bash
+# 卸载清理：停止进程并保留用户数据目录（由系统决定是否删除）。
+set -u
+PID_FILE="${TRIM_PKGVAR:-/tmp/bilimusic}/app.pid"
+if [ -f "$PID_FILE" ]; then
+  pid="$(head -n 1 "$PID_FILE" | tr -d '[:space:]')"
+  [ -n "$pid" ] && kill -TERM "$pid" 2>/dev/null
+  rm -f "$PID_FILE"
+fi
+exit 0

@@ -229,8 +229,8 @@ pub fn save_position(
 pub fn listening_scope(database: State<'_, Database>) -> String {
     profile(&database)
 }
-pub async fn record(
-    app: &tauri::AppHandle,
+pub async fn record<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     expected: &str,
     id: &str,
     seconds: f64,
@@ -276,8 +276,8 @@ pub async fn record(
     tx.commit().map_err(|e| e.to_string())
 }
 #[tauri::command]
-pub async fn listening_record(
-    app: tauri::AppHandle,
+pub async fn listening_record<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     scope: String,
     track_id: String,
     seconds: f64,

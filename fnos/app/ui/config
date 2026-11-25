@@ -1,0 +1,14 @@
+{
+    ".url": {
+        "bilimusic.Application": {
+            "title": "{display_name}",
+            "desc": "B 站音乐播放器",
+            "icon": "images/icon_{0}.png",
+            "type": "url",
+            "protocol": "http",
+            "port": "{port}",
+            "url": "/",
+            "allUsers": true
+        }
+    }
+}
