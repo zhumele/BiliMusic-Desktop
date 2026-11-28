@@ -12,7 +12,9 @@ import { SyncRecovery, type IssueArea } from './SyncRecovery'
 import { describeSyncIssue, type SyncIssue } from '../../services/syncIssues'
 import { accountEpoch } from '../../services/accountScope'
 import { inDesktopShell } from '../../services/desktopApi'
-import { defaultSyncConfig, refreshSyncedLibrary, syncNow, syncStatus, type SyncConfig, type SyncOutcome, type TrackRepairPreview } from '../../services/sync'
+import { hydrateSources } from '../../services/sourceHydration'
+import { defaultSyncConfig, syncNow, syncStatus, type SyncConfig, type SyncOutcome, type TrackRepairPreview } from '../../services/sync'
+import { refreshSyncedLibrary } from './librarySync'
 
 function syncTime(value?: string) {
   if (!value) return '尚未同步'
@@ -88,7 +90,7 @@ export function SyncSettings({embedded=false}:{embedded?:boolean}={}) {
     await refreshSyncedLibrary(client)
     if (session !== accountEpoch()) return
     setOutcome(null)
-    if (result.importError || result.visibilityError || result.chaptersError) {
+    if (result.importError || result.visibilityError || result.chaptersError || result.favoriteOrderError) {
       await status.refetch()
       if (session !== accountEpoch()) return
       setMessage('音乐库已同步，部分资料待处理')
@@ -98,8 +100,9 @@ export function SyncSettings({embedded=false}:{embedded?:boolean}={}) {
     }
     notify()
     await syncStatistics(session)
-    if (session === accountEpoch()) void invoke<number>('sync_hydrate_sources')
-      .then(() => { if (session === accountEpoch()) return refreshSyncedLibrary(client) }).catch(() => undefined)
+    void hydrateSources(session)
+      .then(loaded => { if (loaded && session === accountEpoch()) return refreshSyncedLibrary(client) })
+      .catch(() => undefined)
   }
   const connect = () => action(async session => {
     setOutcome(null)
@@ -145,6 +148,7 @@ export function SyncSettings({embedded=false}:{embedded?:boolean}={}) {
   if (status.data?.importError) issues.push({ area: '导入歌单', issue: describeSyncIssue(status.data.importError) })
   if (status.data?.visibilityError) issues.push({ area: '隐藏偏好', issue: describeSyncIssue(status.data.visibilityError) })
   if (status.data?.chaptersError) issues.push({ area: '章节', issue: describeSyncIssue(status.data.chaptersError) })
+  if (status.data?.favoriteOrderError) issues.push({ area: '歌单排序', issue: describeSyncIssue(status.data.favoriteOrderError) })
   if (statisticsIssue) issues.push({ area: '听歌统计', issue: statisticsIssue })
   const exportBackup = () => action(async session => {
     const path = await invoke<string>('sync_export')

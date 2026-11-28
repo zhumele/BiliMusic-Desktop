@@ -1,23 +1,15 @@
-import { lyricDisplayText } from '../domain/lyricDisplay'
-import { readFloatingPreferences, useFloatingPreferences, type FloatingPreferences } from './floatingLyricsPreferences'
-import { parseLrc } from '../domain/lrc'
+import type { FloatingPreferences } from './floatingLyricsPreferences'
 import { invoke } from '@tauri-apps/api/core'
-import { listen } from '@tauri-apps/api/event'
 import { create } from 'zustand'
-import { isAndroid, isMobile, isIOS, isOHOS } from './platform'
+import { isMobile, isIOS, isOHOS } from './platform'
 import { accountEpoch } from './accountScope'
-import { getStoredLyrics, enrichStoredLyricLines, inDesktopShell } from './desktopApi'
-import type { LyricLine, StoredLyrics } from '../domain/lyrics'
-import { usePlayerStore, playbackClock, nativeLyricPlaybackSession } from '../features/player/playerStore'
-import { useThemeStore } from './theme'
-import { storedLyricLines, systemLrc, floatingTimeline } from '../domain/lyricTimeline'
-import { subtitleScope, useSubtitleState } from '../features/lyrics/useBiliSubtitles'
-import { readSubtitlePreference } from './subtitlePreference'
+import { inDesktopShell } from './desktopApi'
+import type { LyricLine } from '../domain/lyrics'
 
-export type FloatingFrame = { id: string; title: string; artist: string; position: number; rate: number; playing: boolean; theme: string; lines: LyricLine[]; biasMs: number; subtitles?:boolean; fontSize?:number; locked?:boolean; activeColor?:string; inactiveColor?:string; alignment?:FloatingPreferences['alignment']; capturedAt?:number; revision?:number }
+export type FloatingFrame = { id: string; title: string; artist: string; position: number; rate: number; playing: boolean; theme: string; lines: LyricLine[]; biasMs: number; subtitles?:boolean; fontSize?:number; locked?:boolean; activeColor?:string; inactiveColor?:string; alignment?:FloatingPreferences['alignment']; language?:FloatingPreferences['language']; capturedAt?:number; revision?:number }
 export type FloatingCapability = { supported: boolean; enabled: boolean; permissionRequired?: boolean; fontSizeSupported?: boolean; lockSupported?: boolean; colorSupported?:boolean; reason?: string }
 const plugin = isOHOS ? 'ohos-player' : isIOS ? 'ios-player' : 'android-player'
-const nativeLyrics = <T>(data: object) => invoke<T>(`plugin:${plugin}|lyrics`, {data:JSON.stringify(data)})
+export const nativeLyrics = <T>(data: object) => invoke<T>(`plugin:${plugin}|lyrics`, {data:JSON.stringify(data)})
 export const useFloatingLyrics = create<{ enabled:boolean; busy:boolean; error:string }>(() => ({enabled:false,busy:false,error:''}))
 export async function floatingCapability(): Promise<FloatingCapability> {
   if (!inDesktopShell) return {supported:false,enabled:false,reason:'请在客户端中开启'}
@@ -43,117 +35,6 @@ export async function setFloatingLyrics(enabled: boolean) {
     }
     useFloatingLyrics.setState({busy:false})
   }
-}
-
-export function startFloatingLyrics() {
-  if (!inDesktopShell) return
-  let revision = 0, trackKey = '', stored: StoredLyrics | null = null, lines: LyricLine[] = [], lastNative = ''
-  let pending = false, dirty = false
-  let displaySource: LyricLine[] | undefined, displayLines: LyricLine[] = [], timelineRevision = 0
-  const currentKey = () => {
-    const id = usePlayerStore.getState().current?.id || ''
-    return `${accountEpoch()}:${id}:${isAndroid ? nativeLyricPlaybackSession(id) ?? '' : ''}`
-  }
-  const publish = async () => {
-    if (pending) { dirty = true; return }
-    const state = usePlayerStore.getState(), current = state.current, style = useFloatingPreferences.getState()
-    const captions=useSubtitleState.getState()
-    const sourceTimeline=floatingTimeline(lines,stored?.biasMs||0,subtitleScope(current?.source),captions)
-    if (sourceTimeline.lines !== displaySource) {
-      displaySource=sourceTimeline.lines; timelineRevision++
-      displayLines=displaySource.map(line=>({...line,text:lyricDisplayText(line.text),words:line.words?.map(word=>({...word,text:lyricDisplayText(word.text)}))}))
-    }
-    const timeline={...sourceTimeline,lines:displayLines}
-    const frame: FloatingFrame = {id:current?.id || '',title:current?.title || 'BiliMusic',artist:current?.artist || '',position:playbackClock(),rate:state.rate,playing:state.status === 'playing',theme:useThemeStore.getState().theme,...timeline,fontSize:style.fontSize,locked:style.locked,activeColor:style.activeColor,inactiveColor:style.inactiveColor,alignment:style.alignment,capturedAt:Date.now()}
-    if (isMobile) {
-      // Native renderers read their own player's clock, even with JS suspended.
-      const session = isAndroid ? nativeLyricPlaybackSession(frame.id) : undefined
-      // Android can already hold lyrics from its native background lookup. Only
-      // publish a resolved timeline for the same playing session from the WebView.
-      if (isAndroid && (!session || !frame.lines.length)) return
-      const signature = JSON.stringify([session,frame.id,frame.title,timelineRevision,frame.biasMs,frame.subtitles,useFloatingPreferences.getState().fontSize])
-      if (signature === lastNative) return
-      lastNative = signature; pending = true
-      try {
-        if (isIOS) {
-          const lines = frame.lines.map(({ timeMs, endTimeMs, text }) => ({ timeMs, endTimeMs, text }))
-          await nativeLyrics({ action: 'update', id: frame.id, lines, biasMs: frame.biasMs, subtitles: frame.subtitles })
-        } else {
-          await nativeLyrics({action:'update',session,...frame,lrc:systemLrc(frame.lines,frame.biasMs)})
-        }
-      }
-      catch { if (signature === lastNative) lastNative = '' }
-      finally { pending=false; if (dirty) { dirty=false; void publish() } }
-    } else if (useFloatingLyrics.getState().enabled) {
-      pending=true
-      try { await invoke('floating_lyrics_update',{frame}) } catch { /* Window may have just closed. */ }
-      finally { pending=false; if(dirty){dirty=false;void publish()} }
-    }
-  }
-  const load = async () => {
-    const key = currentKey(), request = ++revision
-    trackKey=key; stored=null; lines=[]; void publish()
-    const id = usePlayerStore.getState().current?.id
-    if (!id) return
-    try {
-      const saved = await getStoredLyrics(id)
-      if (request !== revision || key !== currentKey()) return
-      stored=saved; lines=saved && parseLrc(saved.rawText).length ? storedLyricLines(saved) : []; void publish()
-      if (saved && lines.length && !lines.some(line=>line.words?.length)) {
-        const enriched = await enrichStoredLyricLines(saved)
-        if (request !== revision || key !== currentKey()) return
-        if (enriched) { lines=enriched; void publish() }
-      }
-    } catch { /* A lyric lookup must never interrupt music. */ }
-  }
-  const updated = (event: Event) => {
-    const saved = (event as CustomEvent<StoredLyrics>).detail
-    if (saved.trackId !== usePlayerStore.getState().current?.id) return
-    ++revision; stored=saved; lines=parseLrc(saved.rawText).length ? storedLyricLines(saved) : []; void publish()
-  }
-  usePlayerStore.subscribe((state,previous) => {
-    if (currentKey() !== trackKey) void load()
-    else if (state.current?.title !== previous.current?.title || state.current?.artist !== previous.current?.artist ||
-      isIOS && state.status === 'playing' && previous.status !== 'playing' ||
-      !isMobile && (state.status !== previous.status || state.rate !== previous.rate)) void publish()
-  })
-  const configure = () => { if(isIOS||isOHOS)return;const {fontSize,locked,showUnlockButton,activeColor,inactiveColor,alignment}=useFloatingPreferences.getState();void (isMobile ? nativeLyrics({action:'configure',fontSize,locked,showUnlockButton,activeColor,inactiveColor,alignment}) : invoke('floating_lyrics_configure',{locked})).catch(()=>undefined) }
-  useFloatingPreferences.subscribe(()=>{configure();lastNative='';void publish()})
-  window.addEventListener('bilimusic-floating-lyrics-change',configure)
-  configure()
-  useThemeStore.subscribe(() => { void publish() })
-  useSubtitleState.subscribe(() => { void publish() })
-  window.addEventListener('bilimusic-lyrics-updated',updated)
-  window.addEventListener('bilimusic-lyric-bias',updated)
-  window.addEventListener('bilimusic-floating-style',event=>{const value=(event as CustomEvent<{fontSize?:number;locked?:boolean}>).detail,current=useFloatingPreferences.getState();const patch:Partial<{fontSize:number;locked:boolean}>={};if(value.fontSize!==undefined&&value.fontSize!==current.fontSize)patch.fontSize=value.fontSize;if(value.locked!==undefined&&value.locked!==current.locked)patch.locked=value.locked;if(Object.keys(patch).length)current.update(patch)})
-  window.addEventListener('bilimusic-native-floating',event=>useFloatingLyrics.setState({enabled:(event as CustomEvent<boolean>).detail}))
-  window.addEventListener('bilimusic-floating-lyrics-change',()=>{lastNative='';void publish()})
-  window.addEventListener('bilimusic-account-changing',()=>{++revision;stored=null;lines=[];lastNative='';void setFloatingLyrics(false);void publish()})
-  if (!isMobile) {
-    void listen<FloatingPreferences>('floating-lyrics-preferences',event=>{const current=useFloatingPreferences.getState(),value=readFloatingPreferences(JSON.stringify(event.payload));if(Object.entries(value).some(([key,next])=>current[key as keyof FloatingPreferences]!==next))current.update(value)})
-    void listen<string>('floating-lyrics-control', event => {
-      const player=usePlayerStore.getState()
-      if(event.payload==='toggle')void player.toggle()
-      else if(event.payload==='next')void player.next()
-      else if(event.payload==='previous')void player.previous()
-    })
-    void listen('floating-lyrics-unlock',()=>useFloatingPreferences.getState().update({locked:false}))
-    void listen('floating-lyrics-closed',()=>useFloatingLyrics.setState({enabled:false}))
-    window.setInterval(()=>{if(useFloatingLyrics.getState().enabled)void publish()},250)
-  }
-  if (isMobile && !isIOS) void setSystemTitleLyrics(localStorage.getItem('system-title-lyrics') === 'true').catch(() => undefined)
-  if (isMobile) {
-    let pendingSubtitles = Promise.resolve<unknown>(undefined)
-    const syncSubtitles = () => {
-      const enabled = localStorage.getItem('lyrics-subtitles') === 'true'
-      const language = readSubtitlePreference()?.language ?? ''
-      pendingSubtitles = pendingSubtitles.then(() => nativeLyrics({ action: 'subtitle-preference', enabled, language }))
-        .catch(() => undefined)
-    }
-    window.addEventListener('bilimusic-subtitle-preference', syncSubtitles)
-    syncSubtitles()
-  }
-  void load()
 }
 
 let systemTitleWrite: Promise<void> = Promise.resolve()

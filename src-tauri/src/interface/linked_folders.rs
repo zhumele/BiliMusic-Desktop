@@ -153,7 +153,7 @@ async fn owned_folder(
 
 fn check_folder_session(database: &Database, active: &FolderSession) -> Result<(), CommandError> {
     let connection = database.0.lock().map_err(CommandError::database)?;
-    super::commands::check_account_session(&connection, &active.runtime)
+    super::account::check_account_session(&connection, &active.runtime)
 }
 
 fn continued_priority(priority: RequestPriority) -> RequestPriority {
@@ -169,7 +169,7 @@ fn ensure_active(
     folder_id: i64,
     uid: i64,
 ) -> Result<(), CommandError> {
-    super::commands::check_account_session(connection, &active.runtime)?;
+    super::account::check_account_session(connection, &active.runtime)?;
     let owner: Option<i64> = connection
         .query_row(
             "SELECT owner_uid FROM linked_bili_folders WHERE folder_id=?1",
@@ -227,7 +227,7 @@ pub fn bili_linked_folder(
     expected_account_session: String,
 ) -> Result<Option<LinkedFolder>, CommandError> {
     let connection = database.0.lock().map_err(CommandError::database)?;
-    super::commands::check_account_session(&connection, &expected_account_session)?;
+    super::account::check_account_session(&connection, &expected_account_session)?;
     read(&connection, folder_id)
 }
 
@@ -238,6 +238,9 @@ pub struct LinkedMatchedCover {
     bvid: String,
     cover_url: String,
     single_part: bool,
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
 }
 
 fn matched_covers(
@@ -247,18 +250,18 @@ fn matched_covers(
     let bvids = serde_json::to_string(bvids).map_err(CommandError::database)?;
     let mut query = connection
         .prepare_cached(
-            "SELECT t.id, s.bvid, m.cover_url,
+            "SELECT t.id, s.bvid, COALESCE(m.cover_url, ''),
                     COALESCE(sc.part_count = 1, 0) AND NOT EXISTS (
                       SELECT 1 FROM source_items other
                       WHERE other.provider = s.provider AND other.bvid = s.bvid
                         AND other.cid > 0 AND other.cid <> s.cid
-                    )
+                    ), m.title, m.artist, m.album
              FROM (SELECT DISTINCT value FROM json_each(?1)) requested
              CROSS JOIN source_items s ON s.provider = 'bilibili' AND s.bvid = requested.value AND s.cid > 0
              JOIN tracks t ON t.source_item_id = s.id AND t.id = 'bilibili:' || s.bvid || ':' || s.cid
              JOIN metadata_overrides m ON m.track_id = t.id
              LEFT JOIN source_title_cache sc ON sc.track_id = t.id
-             WHERE NULLIF(trim(m.cover_url), '') IS NOT NULL",
+             WHERE m.title IS NOT NULL OR m.artist IS NOT NULL OR m.album IS NOT NULL OR NULLIF(trim(m.cover_url), '') IS NOT NULL",
         )
         .map_err(CommandError::database)?;
     query
@@ -268,6 +271,9 @@ fn matched_covers(
                 bvid: row.get(1)?,
                 cover_url: row.get(2)?,
                 single_part: row.get(3)?,
+                title: row.get(4)?,
+                artist: row.get(5)?,
+                album: row.get(6)?,
             })
         })
         .map_err(CommandError::database)?
@@ -282,7 +288,7 @@ pub fn bili_linked_matched_covers(
     expected_account_session: String,
 ) -> Result<Vec<LinkedMatchedCover>, CommandError> {
     let connection = database.0.lock().map_err(CommandError::database)?;
-    super::commands::check_account_session(&connection, &expected_account_session)?;
+    super::account::check_account_session(&connection, &expected_account_session)?;
     matched_covers(&connection, &bvids)
 }
 
@@ -392,7 +398,7 @@ async fn refresh_folder(
     let _operation = update.lock.lock().await;
     let (active, link_order) = {
         let connection = database.0.lock().map_err(CommandError::database)?;
-        super::commands::check_account_session(&connection, expected_account_session)?;
+        super::account::check_account_session(&connection, expected_account_session)?;
         let matching_refresh_completed =
             update.completed_refreshes.load(Ordering::Relaxed) != requested_after;
         if !link {
@@ -456,22 +462,24 @@ fn read_link_order(connection: &Connection, folder_id: i64) -> Result<Option<f64
 
 // A newly synced link initially has no Bilibili cache. Hydrate a bounded batch
 // after sync; failed/offline folders remain linked and can be retried on opening.
-pub(crate) async fn hydrate_synced_links(database: &Database) -> Result<usize, String> {
-    let (active, folders) = {
+pub(crate) async fn hydrate_synced_links(
+    database: &Database,
+    expected_account_session: &str,
+) -> Result<usize, String> {
+    let folders = {
         let c = database.0.lock().map_err(|_| "数据库正忙")?;
-        let active = session(&c).map_err(|e| e.message)?;
+        super::account::check_account_session(&c, expected_account_session)
+            .map_err(|e| e.message)?;
         let mut q=c.prepare("SELECT folder_id FROM linked_bili_folders WHERE refreshed_at=0 ORDER BY folder_id LIMIT 5").map_err(|e|e.to_string())?;
-        let ids = q
-            .query_map([], |r| r.get::<_, i64>(0))
+        q.query_map([], |r| r.get::<_, i64>(0))
             .map_err(|e| e.to_string())?
             .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|e| e.to_string())?;
-        (active.runtime, ids)
+            .map_err(|e| e.to_string())?
     };
     let mut count = 0;
     for id in folders {
         // Do not start a new request against an account selected mid-hydration.
-        match refresh_folder(database, id, false, &active, true, |_| {}).await {
+        match refresh_folder(database, id, false, expected_account_session, true, |_| {}).await {
             Ok(_) => count += 1,
             Err(error)
                 if matches!(
@@ -502,7 +510,7 @@ pub async fn bili_linked_change(
     let _operation = update.lock.lock().await;
     let active = {
         let connection = database.0.lock().map_err(CommandError::database)?;
-        super::commands::check_account_session(&connection, &expected_account_session)?;
+        super::account::check_account_session(&connection, &expected_account_session)?;
         session(&connection)?
     };
     let priority = RequestPriority::Foreground;
@@ -580,14 +588,14 @@ pub async fn bili_linked_remove_selected(
     let _operation = update.lock.lock().await;
     let active = {
         let connection = database.0.lock().map_err(CommandError::database)?;
-        super::commands::check_account_session(&connection, &expected_account_session)?;
+        super::account::check_account_session(&connection, &expected_account_session)?;
         session(&connection)?
     };
     let priority = RequestPriority::Foreground;
     let (provider, uid, folder) = owned_folder(&database, folder_id, &active, priority).await?;
     let cached = {
         let connection = database.0.lock().map_err(CommandError::database)?;
-        super::commands::check_account_session(&connection, &expected_account_session)?;
+        super::account::check_account_session(&connection, &expected_account_session)?;
         ensure_active(&connection, &active, folder_id, uid)?;
         read(&connection, folder_id)?.ok_or_else(|| CommandError::validation("请先关联此收藏夹"))?
     };
@@ -609,7 +617,7 @@ pub async fn bili_linked_remove_selected(
         }
         {
             let connection = database.0.lock().map_err(CommandError::database)?;
-            super::commands::check_account_session(&connection, &expected_account_session)?;
+            super::account::check_account_session(&connection, &expected_account_session)?;
             ensure_active(&connection, &active, folder_id, uid)?;
             if read(&connection, folder_id)?.is_none() {
                 return Err(CommandError::validation("收藏夹已解除关联"));
@@ -646,7 +654,7 @@ pub async fn bili_linked_remove_selected(
             .ok()
     };
     let connection = database.0.lock().map_err(CommandError::database)?;
-    super::commands::check_account_session(&connection, &expected_account_session)?;
+    super::account::check_account_session(&connection, &expected_account_session)?;
     ensure_active(&connection, &active, folder_id, uid)?;
     let current = read(&connection, folder_id)?
         .ok_or_else(|| CommandError::validation("收藏夹已解除关联"))?;
@@ -991,5 +999,22 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert!(!result[0].single_part);
         assert!(matched_covers(&c, &[]).unwrap().is_empty());
+
+        c.execute(
+            "INSERT INTO metadata_overrides(track_id,title,artist,album) VALUES(?1,'更正歌名','歌手','专辑')",
+            [format!("bilibili:{multi}:3")],
+        )
+        .unwrap();
+        let result = matched_covers(&c, &[multi.into()]).unwrap();
+        let edited_id = format!("bilibili:{multi}:3");
+        let part = result
+            .iter()
+            .find(|part| part.track_id == edited_id)
+            .unwrap();
+        assert_eq!(part.title.as_deref(), Some("更正歌名"));
+        assert_eq!(part.artist.as_deref(), Some("歌手"));
+        assert_eq!(part.album.as_deref(), Some("专辑"));
+        assert!(part.cover_url.is_empty());
+        assert!(!part.single_part);
     }
 }

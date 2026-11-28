@@ -3,7 +3,7 @@ import test from 'node:test'
 import { build } from 'esbuild'
 import { createRequire } from 'node:module'
 const mock = {
- platform: 'export const isMobile=true,isIOS=false,isAndroid=false,isOHOS=false;',
+ platform: 'export const isMobile=true,isNativeMobile=true,isIOS=false,isAndroid=false,isOHOS=false;',
  mobile: `export const observeMobileAudio=async callback=>{globalThis.fixture.receive=callback};export const snapshotMobileAudio=async()=>({});export const mobilePlaybackClock=()=>0;export const setMobileCollection=async()=>{};export const prepareMobileAudio=async()=>{};export const playMobileAudio=async(...args)=>{globalThis.fixture.starts??=[];globalThis.fixture.starts.push(args);globalThis.fixture.receive({id:args[0].id,status:'playing',position:0})};export const controlMobileAudio=(action,value)=>globalThis.fixture.control(action,value);`,
  ios: 'export const iosListenerAge=()=>0;export const playIOSAudio=async()=>{};export const restartIOSAudioObservation=async()=>{};export const syncIOSQueue=async()=>{};',
  android: 'export const syncAndroidQueue=async()=>{};',

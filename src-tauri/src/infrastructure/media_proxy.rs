@@ -1,4 +1,7 @@
-use super::playback_cache::{CHUNK_SIZE, PlaybackCache, Variant};
+use super::{
+    legacy_avc::AvcPatch,
+    playback_cache::{CHUNK_SIZE, PlaybackCache, Variant},
+};
 use axum::{
     Router,
     body::Body,
@@ -56,6 +59,7 @@ struct MediaEntry {
     local_path: Option<std::path::PathBuf>,
     prefix: Arc<RwLock<(Vec<u8>, u64)>>,
     legacy_edit: Arc<tokio::sync::OnceCell<Option<usize>>>,
+    legacy_avc: Arc<tokio::sync::OnceCell<Option<(u64, Arc<AvcPatch>)>>>,
     cached: Option<Arc<CachedAudio>>,
 }
 
@@ -307,6 +311,7 @@ impl MediaProxy {
                 local_path: None,
                 prefix: Arc::new(RwLock::new((Vec::new(), 0))),
                 legacy_edit: Default::default(),
+                legacy_avc: Default::default(),
                 cached: None,
             },
         );
@@ -337,6 +342,7 @@ impl MediaProxy {
                 local_path: Some(path),
                 prefix: Arc::new(RwLock::new((Vec::new(), 0))),
                 legacy_edit: Default::default(),
+                legacy_avc: Default::default(),
                 cached: None,
             },
         );
@@ -459,8 +465,10 @@ impl MediaProxy {
         codecs: &str,
     ) -> String {
         // 网页/浏览器模式（server feature）由浏览器解码，不能输出仅供 AVFoundation 使用的 HLS。
-        if cfg!(all(any(target_os = "ios", target_os = "macos"), not(feature = "server")))
-            && super::fragmented_mp4::prefer_segmented(duration_seconds, codecs)
+        if cfg!(all(
+            any(target_os = "ios", target_os = "macos"),
+            not(feature = "server")
+        )) && super::fragmented_mp4::prefer_segmented(duration_seconds, codecs)
         {
             match self.segmented_mp4(&url).await {
                 Ok(Some(segmented)) => return segmented,
@@ -485,8 +493,10 @@ impl MediaProxy {
         codecs: &str,
     ) -> String {
         // 网页/浏览器模式（server feature）由浏览器解码，不能输出仅供 AVFoundation 使用的 HLS。
-        if cfg!(all(any(target_os = "ios", target_os = "macos"), not(feature = "server")))
-            && super::fragmented_mp4::prefer_segmented(duration_seconds, codecs)
+        if cfg!(all(
+            any(target_os = "ios", target_os = "macos"),
+            not(feature = "server")
+        )) && super::fragmented_mp4::prefer_segmented(duration_seconds, codecs)
         {
             let id = url.rsplit('/').next().unwrap_or_default();
             let mut entries = self.state.entries.write().await;
@@ -572,6 +582,7 @@ impl MediaProxy {
                 local_path: None,
                 prefix: Arc::new(RwLock::new((vec![], 0))),
                 legacy_edit: Default::default(),
+                legacy_avc: Default::default(),
                 cached: Some(Arc::new(audio)),
             },
         );
@@ -835,6 +846,7 @@ impl CachedAudio {
             local_path: None,
             prefix: Arc::new(RwLock::new((vec![], 0))),
             legacy_edit: Default::default(),
+            legacy_avc: Default::default(),
             cached: None,
         };
         let stream = resumable_media(
@@ -1054,25 +1066,19 @@ async fn proxy_media(
             return status_response(StatusCode::SERVICE_UNAVAILABLE);
         }
     }
+    if uri.query() == Some("legacy_avc=1") && entry.content_type == "video/mp4" {
+        match serve_legacy_avc(&state, &media_id, &entry, &request_headers).await {
+            Ok(Some(response)) => return response,
+            // A complete prefix confirmed that no compatibility patch applies.
+            Ok(None) => {}
+            Err(status) => return status_response(status),
+        }
+    }
     let patch = if uri.query() == Some("legacy_mp4=1") && entry.content_type == "audio/mp4" {
         entry
             .legacy_edit
             .get_or_try_init(|| async {
-                const LIMIT: usize = 64 * 1024;
-                let mut headers = HeaderMap::new();
-                headers.insert(header::RANGE, HeaderValue::from_static("bytes=0-65535"));
-                let prefix = tokio::time::timeout(Duration::from_secs(3), async {
-                    let response =
-                        serve_media_entry(&state, &media_id, entry.clone(), &headers).await;
-                    if response_span(response.headers()).is_none_or(|span| span.0 != 0) {
-                        return Err(());
-                    }
-                    axum::body::to_bytes(response.into_body(), LIMIT)
-                        .await
-                        .map_err(|_| ())
-                })
-                .await
-                .map_err(|_| ())??;
+                let (prefix, _) = legacy_mp4_prefix(&state, &media_id, &entry).await?;
                 Ok::<_, ()>(super::fragmented_mp4::empty_audio_edit_offset(&prefix))
             })
             .await
@@ -1087,6 +1093,118 @@ async fn proxy_media(
         Some(offset) => neutralize_legacy_edit(response, offset as u64),
         None => response,
     }
+}
+
+const LEGACY_MP4_PREFIX_LIMIT: usize = 64 * 1024;
+
+async fn legacy_mp4_prefix(
+    state: &ProxyState,
+    id: &str,
+    entry: &MediaEntry,
+) -> Result<(axum::body::Bytes, u64), ()> {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::RANGE, HeaderValue::from_static("bytes=0-65535"));
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let response = serve_media_entry(state, id, entry.clone(), &headers).await;
+        let (0, _, total) = response_span(response.headers()).ok_or(())? else {
+            return Err(());
+        };
+        let bytes = axum::body::to_bytes(response.into_body(), LEGACY_MP4_PREFIX_LIMIT)
+            .await
+            .map_err(|_| ())?;
+        Ok((bytes, total))
+    })
+    .await
+    .map_err(|_| ())?
+}
+
+async fn serve_legacy_avc(
+    state: &ProxyState,
+    id: &str,
+    entry: &MediaEntry,
+    headers: &HeaderMap,
+) -> Result<Option<Response<Body>>, StatusCode> {
+    let compatibility = entry
+        .legacy_avc
+        .get_or_try_init(|| async {
+            let (prefix, total) = legacy_mp4_prefix(state, id, entry).await?;
+            if prefix.len() as u64 != total.min(LEGACY_MP4_PREFIX_LIMIT as u64) {
+                return Err(());
+            }
+            Ok::<_, ()>(AvcPatch::from_init(&prefix).map(|patch| (total, Arc::new(patch))))
+        })
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let Some((total, patch)) = compatibility else {
+        return Ok(None);
+    };
+    let range = headers
+        .get(header::RANGE)
+        .map(|value| value.to_str())
+        .transpose()
+        .map_err(|_| StatusCode::RANGE_NOT_SATISFIABLE)?;
+    let (start, end) = byte_range(range, *total).ok_or(StatusCode::RANGE_NOT_SATISFIABLE)?;
+    let mut position = start.saturating_sub(patch.context());
+    let last = end.saturating_add(patch.context()).min(total - 1);
+    let mut request = headers.clone();
+    if range.is_some() {
+        // Keep enough context to patch an SPS even when a range starts or ends inside it.
+        request.insert(
+            header::RANGE,
+            format!("bytes={position}-{last}")
+                .parse()
+                .expect("numeric byte range"),
+        );
+    }
+    let response = serve_media_entry(state, id, entry.clone(), &request).await;
+    if range.is_some() {
+        if response.status() != StatusCode::PARTIAL_CONTENT
+            || response_span(response.headers()) != Some((position, last, *total))
+        {
+            return Err(StatusCode::BAD_GATEWAY);
+        }
+    } else if response.status() != StatusCode::OK {
+        return Err(StatusCode::BAD_GATEWAY);
+    }
+    let (mut parts, body) = response.into_parts();
+    if range.is_some() {
+        parts
+            .headers
+            .insert(header::CONTENT_LENGTH, (end - start + 1).into());
+        parts.headers.insert(
+            header::CONTENT_RANGE,
+            format!("bytes {start}-{end}/{total}")
+                .parse()
+                .expect("numeric byte range"),
+        );
+    }
+    let patch = patch.clone();
+    let mut pending = Vec::new();
+    let chunks = body
+        .into_data_stream()
+        .map(|chunk| chunk.map(Some))
+        .chain(futures_util::stream::once(async { Ok(None) }))
+        .map(move |chunk| {
+            let bytes = match chunk? {
+                Some(bytes) => {
+                    pending.extend_from_slice(&bytes);
+                    patch.inspect(&mut pending)
+                }
+                None => std::mem::take(&mut pending),
+            };
+            let next = position + bytes.len() as u64;
+            let first = position.max(start);
+            let last = next.min(end + 1);
+            let visible = if first < last {
+                axum::body::Bytes::from(bytes)
+                    .slice((first - position) as usize..(last - position) as usize)
+            } else {
+                axum::body::Bytes::new()
+            };
+            position = next;
+            Ok::<_, axum::Error>(visible)
+        });
+    Ok(Some(Response::from_parts(parts, Body::from_stream(chunks))))
 }
 
 fn neutralize_legacy_edit(response: Response<Body>, offset: u64) -> Response<Body> {
@@ -1607,6 +1725,124 @@ mod tests {
     use super::MediaProxy;
 
     #[tokio::test]
+    async fn legacy_avc_route_preserves_byte_ranges_including_splits_inside_the_sps() {
+        use super::*;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (mut original, flag) = super::super::legacy_avc::fixture();
+        let (_, _, mdat_body) = super::super::fragmented_mp4::boxes(&original)
+            .find(|(kind, _, _)| *kind == b"mdat")
+            .unwrap();
+        // Keep the test SPS outside the proxy's in-memory prefix.
+        let media = original.split_off(mdat_body - 8);
+        let padding = PREFIX_LIMIT + 4096;
+        original.extend_from_slice(&(padding as u32).to_be_bytes());
+        original.extend_from_slice(b"free");
+        original.resize(original.len() + padding - 8, 0);
+        original.extend(media);
+        let flag = flag + padding;
+        let total = original.len();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream = format!("http://{}/video", listener.local_addr().unwrap());
+        let fixture = original.clone();
+        let capped = Arc::new(AtomicBool::new(true));
+        let upstream_cap = capped.clone();
+        let app = Router::new().route(
+            "/video",
+            get(move |heads: HeaderMap| {
+                let bytes = fixture.clone();
+                let capped = upstream_cap.load(Ordering::Relaxed);
+                async move {
+                    let range = heads
+                        .get(header::RANGE)
+                        .map(|value| value.to_str().unwrap());
+                    let (start, mut end) = byte_range(range, bytes.len() as u64).unwrap();
+                    let prefix = start == 0 && end == LEGACY_MP4_PREFIX_LIMIT as u64 - 1;
+                    let widened = start > 0 && start < flag as u64 && end > flag as u64;
+                    if capped && (prefix || widened) {
+                        end -= 1;
+                    }
+                    let mut response = Response::builder()
+                        .header(header::CONTENT_LENGTH, end - start + 1)
+                        .header(header::ACCEPT_RANGES, "bytes");
+                    if range.is_some() {
+                        response = response.status(206).header(
+                            header::CONTENT_RANGE,
+                            format!("bytes {start}-{end}/{}", bytes.len()),
+                        );
+                    }
+                    response
+                        .body(Body::from(bytes[start as usize..=end as usize].to_vec()))
+                        .unwrap()
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let proxy = MediaProxy::start().await.unwrap();
+        let url = proxy
+            .register_stream(upstream, vec![], "video/mp4".into())
+            .await;
+        let compatibility = format!("{url}?legacy_avc=1");
+        let client = reqwest::Client::new();
+        let mut expected = original.clone();
+        expected[flag] = 0x50;
+        let read_flag = || {
+            client
+                .get(&compatibility)
+                .header(header::RANGE, format!("bytes={flag}-{flag}"))
+                .send()
+        };
+        // Neither a partial initialization probe nor a partial widened request
+        // may let the original SPS through at the compatibility URL.
+        assert_eq!(read_flag().await.unwrap().status(), StatusCode::BAD_GATEWAY);
+        capped.store(false, Ordering::Relaxed);
+        for (request, start, end) in [
+            (format!("bytes={flag}-{flag}"), flag, flag),
+            (format!("bytes={}-", flag - 2), flag - 2, total - 1),
+            (format!("bytes=-{}", total - flag), flag, total - 1),
+        ] {
+            let response = client
+                .get(&compatibility)
+                .header(header::RANGE, request)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+            assert_eq!(
+                response.headers()[header::CONTENT_RANGE],
+                format!("bytes {start}-{end}/{total}")
+            );
+            assert_eq!(response.content_length(), Some((end - start + 1) as u64));
+            assert_eq!(
+                response.bytes().await.unwrap().as_ref(),
+                &expected[start..=end]
+            );
+        }
+        let response = client.get(&compatibility).send().await.unwrap();
+        assert_eq!(response.content_length(), Some(total as u64));
+        assert_eq!(response.bytes().await.unwrap().as_ref(), expected);
+        capped.store(true, Ordering::Relaxed);
+        assert_eq!(read_flag().await.unwrap().status(), StatusCode::BAD_GATEWAY);
+        capped.store(false, Ordering::Relaxed);
+        assert_eq!(
+            read_flag().await.unwrap().bytes().await.unwrap().as_ref(),
+            &[0x50]
+        );
+        assert_eq!(
+            client
+                .get(&url)
+                .send()
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap()
+                .as_ref(),
+            original
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn legacy_mp4_repairs_only_the_empty_audio_edit_and_preserves_ranges() {
         use super::*;
         fn atom(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
@@ -1766,7 +2002,10 @@ mod tests {
             .await;
         assert_eq!(requests.load(Ordering::Relaxed), 0);
         // 网页/浏览器模式（server feature）由浏览器解码，不能输出仅供 AVFoundation 使用的 HLS。
-        if cfg!(all(any(target_os = "ios", target_os = "macos"), not(feature = "server"))) {
+        if cfg!(all(
+            any(target_os = "ios", target_os = "macos"),
+            not(feature = "server")
+        )) {
             assert!(upgrade.ends_with("/index.m3u8"));
             let client = Client::builder().no_proxy().build().unwrap();
             let lazy_guard = proxy.guard_upgrade(&upgrade, 0).await;
@@ -2613,6 +2852,7 @@ mod tests {
             local_path: None,
             prefix: cache.clone(),
             legacy_edit: Default::default(),
+            legacy_avc: Default::default(),
             cached: None,
         };
         let stream = super::resumable_media(

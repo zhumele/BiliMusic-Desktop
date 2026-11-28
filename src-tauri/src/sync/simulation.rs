@@ -98,6 +98,135 @@ async fn sync(p: &Profile, cfg: &Config, secret: &Secret) -> super::Outcome {
 }
 
 #[tokio::test]
+async fn favorites_can_replace_and_reorder_without_changing_the_core_sync_format() {
+    use crate::infrastructure::repositories::{
+        library::{LibraryRepository, TrackInput},
+        playlists::{FAVORITES_PLAYLIST_ID as FAVORITES, PlaylistRepository},
+    };
+    let (cfg, secret, _, server) = test_dav::server().await;
+    let a = Profile::new(&cfg);
+    let b = Profile::new(&cfg);
+    let track = |cid| TrackInput {
+        id: format!("bilibili:BV1qFuQz2EVx:{cid}"),
+        cid,
+        bvid: "BV1qFuQz2EVx".into(),
+        aid: None,
+        page: cid as i32,
+        source_title: "同一首歌".into(),
+        source_title_context: None,
+        title: "同一首歌".into(),
+        artist: None,
+        album: None,
+        cover_url: Some(format!("https://i0.hdslb.com/bfs/cover/{cid}.jpg")),
+        duration_seconds: 180,
+        uploader_id: None,
+        uploader_name: None,
+    };
+    let ids = |cids: &[i64]| cids.iter().map(|&cid| track(cid).id).collect::<Vec<_>>();
+    let order = |profile: &Profile| {
+        PlaylistRepository::tracks(&profile.0.0.lock().unwrap(), FAVORITES)
+            .unwrap()
+            .into_iter()
+            .map(|track| track.id)
+            .collect::<Vec<_>>()
+    };
+    {
+        let mut c = a.0.0.lock().unwrap();
+        for cid in 1..=3 {
+            let item = track(cid);
+            LibraryRepository::upsert(&mut c, &item).unwrap();
+            LibraryRepository::set_favorite(&c, &item.id, true).unwrap();
+        }
+        PlaylistRepository::create(&c, LIST, "另一份歌单").unwrap();
+        PlaylistRepository::add_track(&c, LIST, &track(2).id).unwrap();
+        assert_eq!(
+            PlaylistRepository::replace_video(
+                &mut c,
+                &a.0.1,
+                FAVORITES,
+                &track(2).id,
+                &track(1),
+                None
+            )
+            .unwrap(),
+            Some("duplicate")
+        );
+        assert_eq!(
+            PlaylistRepository::replace_video(
+                &mut c,
+                &a.0.1,
+                FAVORITES,
+                &track(2).id,
+                &track(4),
+                None
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            PlaylistRepository::tracks(&c, LIST).unwrap()[0].id,
+            track(2).id
+        );
+    }
+    assert_eq!(order(&a), ids(&[3, 4, 1]));
+    let snapshot = a.snapshot(&cfg);
+    assert_eq!(
+        snapshot.records[&format!("favorite:{}", track(4).id)]
+            .fields
+            .len(),
+        1
+    );
+    assert!(
+        snapshot
+            .records
+            .keys()
+            .all(|key| !key.starts_with("favorite-order"))
+    );
+    assert_eq!(sync(&a, &cfg, &secret).await.favorite_order_error, None);
+    assert_eq!(sync(&b, &cfg, &secret).await.favorite_order_error, None);
+    assert_eq!(order(&b), ids(&[3, 4, 1]));
+    {
+        let mut c = b.0.0.lock().unwrap();
+        assert!(
+            PlaylistRepository::reorder(
+                &mut c,
+                &b.0.1,
+                FAVORITES,
+                &ids(&[3, 4, 1]),
+                &ids(&[1, 4, 3])
+            )
+            .unwrap()
+        );
+        assert!(
+            !PlaylistRepository::reorder(
+                &mut c,
+                &b.0.1,
+                FAVORITES,
+                &ids(&[3, 4, 1]),
+                &ids(&[4, 1, 3])
+            )
+            .unwrap()
+        );
+    }
+    assert_eq!(sync(&b, &cfg, &secret).await.favorite_order_error, None);
+    assert!(sync(&a, &cfg, &secret).await.changed);
+    assert_eq!(order(&a), ids(&[1, 4, 3]));
+    {
+        let mut c = a.0.0.lock().unwrap();
+        PlaylistRepository::remove_track(&c, FAVORITES, &track(4).id).unwrap();
+        assert_eq!(PlaylistRepository::tracks(&c, FAVORITES).unwrap().len(), 2);
+        assert!(LibraryRepository::get(&c, &track(4).id).unwrap().is_some());
+        LibraryRepository::upsert(&mut c, &track(5)).unwrap();
+        LibraryRepository::set_favorite(&c, &track(5).id, true).unwrap();
+    }
+    assert_eq!(order(&a), ids(&[5, 1, 3]));
+    assert!(sync(&a, &cfg, &secret).await.conflicts.is_empty());
+    assert!(sync(&b, &cfg, &secret).await.conflicts.is_empty());
+    assert_eq!(order(&b), ids(&[5, 1, 3]));
+    server.abort();
+}
+
+#[tokio::test]
 async fn followed_collection_progress_round_trips_without_creating_favorites() {
     use crate::infrastructure::repositories::collections::{change, progress, save_progress};
     let (mut cfg, secret, store, server) = test_dav::server().await;
@@ -109,20 +238,49 @@ async fn followed_collection_progress_round_trips_without_creating_favorites() {
     let first_key = format!("collectionProgress:{first}");
     let second_key = format!("collectionProgress:{second}");
     let insert = |profile: &Profile, reference, track, seconds, time| {
-        assert!(save_progress(&profile.0.0.lock().unwrap(), reference, track, seconds, time).unwrap());
+        assert!(
+            save_progress(
+                &profile.0.0.lock().unwrap(),
+                reference,
+                track,
+                seconds,
+                time
+            )
+            .unwrap()
+        );
     };
     a.sql("INSERT INTO collections(bvid) VALUES('up:42')");
-    insert(&a, first, "bilibili:BV1tZuKzgENQ:12101234567", 85.0, 1_794_355_030_000);
-    insert(&a, second, "bilibili:BV1qFuQz2EVx:12101234568", 22.0, 1_794_355_040_000);
+    insert(
+        &a,
+        first,
+        "bilibili:BV1tZuKzgENQ:12101234567",
+        85.0,
+        1_794_355_030_000,
+    );
+    insert(
+        &a,
+        second,
+        "bilibili:BV1qFuQz2EVx:12101234568",
+        22.0,
+        1_794_355_040_000,
+    );
     let snapshot = a.snapshot(&cfg);
     assert_eq!(snapshot.records.len(), 3);
-    assert!(!snapshot.records.contains_key(&format!("collection:{first}")));
+    assert!(
+        !snapshot
+            .records
+            .contains_key(&format!("collection:{first}"))
+    );
     let mut legacy_view = snapshot.clone();
     legacy_view.omit_followed_season_progress();
     legacy_view.validate(&cfg.uid).unwrap();
     assert_eq!(legacy_view.records.len(), 1);
-    let new_bytes = serde_json::to_vec(&snapshot).unwrap().len() - serde_json::to_vec(&legacy_view).unwrap().len();
-    assert!(new_bytes < 400, "two checkpoint records add {new_bytes} bytes");
+    let new_bytes = serde_json::to_vec(&snapshot).unwrap().len()
+        - serde_json::to_vec(&legacy_view).unwrap().len();
+    assert!(
+        new_bytes < 400,
+        "two checkpoint records add {new_bytes} bytes"
+    );
     eprintln!("two season checkpoints add {new_bytes} JSON bytes");
     assert!(sync(&a, &cfg, &secret).await.conflicts.is_empty());
     // A device without history sync still downloads the follow, without
@@ -130,32 +288,58 @@ async fn followed_collection_progress_round_trips_without_creating_favorites() {
     let mut without_history = cfg.clone();
     without_history.history = false;
     let c = Profile::new(&without_history);
-    assert!(sync(&c, &without_history, &secret).await.conflicts.is_empty());
+    assert!(
+        sync(&c, &without_history, &secret)
+            .await
+            .conflicts
+            .is_empty()
+    );
     assert_eq!(c.snapshot(&without_history), legacy_view);
     assert!(progress(&c.0.0.lock().unwrap(), first).unwrap().is_none());
 
     assert!(sync(&b, &cfg, &secret).await.conflicts.is_empty());
     assert_eq!(b.snapshot(&cfg), snapshot);
     assert_eq!(
-        progress(&b.0.0.lock().unwrap(), "up:42").unwrap().unwrap().collection_ref.as_deref(),
+        progress(&b.0.0.lock().unwrap(), "up:42")
+            .unwrap()
+            .unwrap()
+            .collection_ref
+            .as_deref(),
         Some(second)
     );
     // Write from a favorited entry, then remove that exact favorite. The
     // unchanged creator membership retains the one canonical checkpoint.
     b.sql(&format!("INSERT INTO collections(bvid) VALUES('{first}')"));
-    insert(&b, first, "bilibili:BV1tZuKzgENQ:12101234567", 97.25, 1_794_355_050_000);
+    insert(
+        &b,
+        first,
+        "bilibili:BV1tZuKzgENQ:12101234567",
+        97.25,
+        1_794_355_050_000,
+    );
     change(&mut b.0.0.lock().unwrap(), "remove", first, "", None).unwrap();
     let old_objects: BTreeSet<_> = store.lock().unwrap().files.keys().cloned().collect();
     assert!(sync(&b, &cfg, &secret).await.conflicts.is_empty());
-    let uploaded: usize = store.lock().unwrap().files.iter()
+    let uploaded: usize = store
+        .lock()
+        .unwrap()
+        .files
+        .iter()
         .filter(|(path, _)| path.contains("/objects/") && !old_objects.contains(*path))
-        .map(|(_, (data, _))| data.len()).sum();
-    assert!((1..=2048).contains(&uploaded), "checkpoint update uploaded {uploaded} object bytes");
+        .map(|(_, (data, _))| data.len())
+        .sum();
+    assert!(
+        (1..=2048).contains(&uploaded),
+        "checkpoint update uploaded {uploaded} object bytes"
+    );
     eprintln!("single season update added {uploaded} WebDAV object bytes");
     assert!(sync(&a, &cfg, &secret).await.conflicts.is_empty());
     assert_eq!(a.snapshot(&cfg), b.snapshot(&cfg));
     let point = progress(&a.0.0.lock().unwrap(), "up:42").unwrap().unwrap();
-    assert_eq!((point.collection_ref.as_deref(), point.position_ms), (Some(first), 97_250));
+    assert_eq!(
+        (point.collection_ref.as_deref(), point.position_ms),
+        (Some(first), 97_250)
+    );
 
     b.sql(&format!("INSERT INTO collections(bvid) VALUES('{second}')"));
     change(&mut b.0.0.lock().unwrap(), "remove", "up:42", "", None).unwrap();
@@ -332,7 +516,9 @@ async fn every_bootstrap_request_boundary_recovers_before_and_after_server_commi
                 "unvisited request {i} {method}"
             );
             assert!(
-                first.as_ref().map_or(true, super::Outcome::has_extension_error),
+                first
+                    .as_ref()
+                    .map_or(true, super::Outcome::has_extension_error),
                 "failure was silently accepted at {i} {method}"
             );
             for _ in 0..2 {
@@ -1460,7 +1646,9 @@ async fn quota_exhaustion_at_every_bootstrap_boundary_resumes_without_losing_off
         )
         .await;
         assert!(
-            result.as_ref().map_or(true, super::Outcome::has_extension_error),
+            result
+                .as_ref()
+                .map_or(true, super::Outcome::has_extension_error),
             "cutoff={cutoff}"
         );
         assert_eq!(store.lock().unwrap().requests.len(), cutoff);

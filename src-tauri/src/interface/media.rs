@@ -1,5 +1,11 @@
-use super::error::CommandError;
-use crate::infrastructure::{database::Database, providers::bilibili::*};
+use super::{
+    account::{authenticated_provider, check_account_session},
+    error::CommandError,
+};
+use crate::infrastructure::{
+    database::{Database, account_session},
+    providers::bilibili::*,
+};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -56,9 +62,15 @@ pub async fn bili_media_options(
     provider: State<'_, BilibiliProvider>,
     bvid: String,
     cid: i64,
+    background: Option<bool>,
 ) -> Result<MediaOptions, CommandError> {
+    let priority = if background.unwrap_or(false) {
+        RequestPriority::Background
+    } else {
+        RequestPriority::Foreground
+    };
     provider
-        .media_options(&bvid, cid)
+        .media_options(&bvid, cid, priority)
         .await
         .map_err(CommandError::bilibili)
 }
@@ -86,7 +98,10 @@ pub async fn bili_season_cover(
     if mid <= 0 || season_id <= 0 {
         return Err(CommandError::validation("合集标识无效"));
     }
-    provider.season_preview_cover(mid, season_id).await.map_err(CommandError::bilibili)
+    provider
+        .season_preview_cover(mid, season_id)
+        .await
+        .map_err(CommandError::bilibili)
 }
 #[tauri::command]
 pub async fn bili_video_chapters(
@@ -149,7 +164,7 @@ pub fn observe_native_listening(app: tauri::AppHandle) {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct Sample {
-            scope: String,
+            account_session: String,
             track_id: String,
             seconds: Option<f64>,
             session_id: Option<String>,
@@ -163,7 +178,7 @@ pub fn observe_native_listening(app: tauri::AppHandle) {
                 if let Some(seconds) = sample.seconds {
                     let _ = record(
                         &handle,
-                        &sample.scope,
+                        &sample.account_session,
                         &sample.track_id,
                         seconds,
                         sample.observed_at,
@@ -174,7 +189,7 @@ pub fn observe_native_listening(app: tauri::AppHandle) {
                 if let (Some(position), Some(observed_at)) = (sample.position, sample.observed_at) {
                     save_position(
                         &handle,
-                        &sample.scope,
+                        &sample.account_session,
                         &sample.track_id,
                         position,
                         observed_at,
@@ -196,7 +211,7 @@ pub fn observe_native_listening(app: tauri::AppHandle) {
 #[cfg(any(target_os = "android", target_os = "ios", target_env = "ohos"))]
 pub fn save_position(
     app: &tauri::AppHandle,
-    scope: &str,
+    expected_session: &str,
     id: &str,
     seconds: f64,
     observed_at: i64,
@@ -204,7 +219,7 @@ pub fn save_position(
 ) {
     let db = app.state::<Database>();
     if let Ok(connection) = db.0.lock() {
-        if profile(&db) == scope {
+        if playback_account_matches(&connection, expected_session).unwrap_or(false) {
             let _ = crate::infrastructure::repositories::library::LibraryRepository::save_playback_position(
                 &connection, id, seconds, observed_at,
             );
@@ -226,12 +241,20 @@ pub fn save_position(
 }
 
 #[tauri::command]
-pub fn listening_scope(database: State<'_, Database>) -> String {
-    profile(&database)
+pub fn listening_scope(database: State<'_, Database>) -> Result<String, CommandError> {
+    let connection = database.0.lock().map_err(CommandError::database)?;
+    account_session(&connection).map_err(CommandError::database)
 }
+pub(crate) fn playback_account_matches(
+    connection: &Connection,
+    expected_session: &str,
+) -> rusqlite::Result<bool> {
+    Ok(account_session(connection)? == expected_session)
+}
+
 pub async fn record<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
-    expected: &str,
+    expected_session: &str,
     id: &str,
     seconds: f64,
     observed_at: Option<i64>,
@@ -249,10 +272,11 @@ pub async fn record<R: tauri::Runtime>(
     let state = app.state::<crate::sync::SyncState>();
     let _gate = state.account_gate.lock().await;
     let db = app.state::<Database>();
-    if profile(&db) != expected {
+    let mut c = db.0.lock().map_err(|_| "数据库正忙")?;
+    if !playback_account_matches(&c, expected_session).map_err(|error| error.to_string())? {
         return Ok(());
     }
-    let mut c = db.0.lock().map_err(|_| "数据库正忙")?;
+    let active_profile = profile(&db);
     if !c
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM tracks WHERE id=?1)",
@@ -267,7 +291,7 @@ pub async fn record<R: tauri::Runtime>(
     crate::sync::statistics::record(
         &tx,
         &db.1,
-        expected,
+        &active_profile,
         id,
         seconds,
         Some(observed_at as f64 / 1000.0),
@@ -306,18 +330,37 @@ pub fn listening_statistics(database: State<'_, Database>) -> Result<Value, Comm
 }
 
 #[tauri::command]
-pub async fn listening_hydrate_tags(database: State<'_, Database>, provider: State<'_, BilibiliProvider>) -> Result<usize, CommandError> {
-    crate::sync::statistics::hydrate_tags(&database, &provider).await.map_err(CommandError::database)
+pub async fn listening_hydrate_tags(
+    database: State<'_, Database>,
+    provider: State<'_, BilibiliProvider>,
+) -> Result<usize, CommandError> {
+    crate::sync::statistics::hydrate_tags(&database, &provider)
+        .await
+        .map_err(CommandError::database)
 }
 
 #[tauri::command]
 pub async fn bili_creator_catalog(
     provider: State<'_, BilibiliProvider>,
+    database: State<'_, Database>,
     action: String,
     keyword: Option<String>,
     mid: Option<i64>,
     page: Option<u32>,
+    expected_account_session: Option<String>,
 ) -> Result<Value, CommandError> {
+    if action == "following" {
+        let session = expected_account_session
+            .as_deref()
+            .ok_or_else(|| CommandError::validation("ACCOUNT_SESSION_EXPIRED"))?;
+        let scoped_provider = authenticated_provider(&database, session).await?;
+        let result = scoped_provider
+            .creator_catalog(&action, "", 0, page.unwrap_or(1))
+            .await;
+        let c = database.0.lock().map_err(CommandError::database)?;
+        check_account_session(&c, session)?;
+        return result.map_err(CommandError::bilibili);
+    }
     provider
         .creator_catalog(
             &action,
@@ -327,4 +370,37 @@ pub async fn bili_creator_catalog(
         )
         .await
         .map_err(CommandError::bilibili)
+}
+
+#[cfg(test)]
+mod playback_account_tests {
+    use super::*;
+
+    #[test]
+    fn returning_to_the_same_profile_rejects_samples_from_the_first_visit() {
+        let dir = std::env::temp_dir().join(format!(
+            "bilimusic-playback-account-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let db = Database(
+            std::sync::Mutex::new(Connection::open_in_memory().unwrap()),
+            dir.clone(),
+        );
+        db.switch(Some(42), Some("SESSDATA=first")).unwrap();
+        let first = account_session(&db.0.lock().unwrap()).unwrap();
+        db.switch(Some(43), Some("SESSDATA=second")).unwrap();
+        let other = account_session(&db.0.lock().unwrap()).unwrap();
+        db.switch(Some(42), Some("SESSDATA=third")).unwrap();
+        {
+            let connection = db.0.lock().unwrap();
+            let current = account_session(&connection).unwrap();
+            assert_eq!(profile(&db), "42");
+            assert!(!playback_account_matches(&connection, &first).unwrap());
+            assert!(!playback_account_matches(&connection, &other).unwrap());
+            assert!(playback_account_matches(&connection, &current).unwrap());
+        }
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

@@ -18,7 +18,7 @@ const mocks={
  useArtworkFit:`export const useArtworkFit=()=>({stage:{current:null},onRatio(){}});`,
  mobileAudio:`export const controlMobileAudio=async()=>{};`,
  trackActionStore:`export const chooseTrackPlaylist=()=>{};`,
- desktopApi:`${['getDanmaku','getVideoSource','getStoredLyrics','enrichStoredLyricLines','getVideoParts','saveStoredLyrics','lyricMatchVersion','saveLyricsWithMetadata','searchMetadataCatalog','searchLyrics','setStoredLyricsBias'].map(n=>`export const ${n}=async()=>null;`).join('')}export const commandErrorMessage=String;export const toTrackInput=track=>track;`,
+ desktopApi:`${['getDanmaku','getVideoSource','getStoredLyrics','clearStoredLyrics','enrichStoredLyricLines','getVideoParts','saveStoredLyrics','lyricMatchVersion','saveLyricsWithMetadata','searchMetadataCatalog','searchLyrics','setStoredLyricsBias'].map(n=>`export const ${n}=async()=>null;`).join('')}export const commandErrorMessage=String;export const toTrackInput=track=>track;`,
 }
 for(const [module,names] of Object.entries({SeekRange:['SeekRange'],FloatingLyricsToggle:['FloatingLyricsToggle'],SeasonBrowser:['SeasonBrowser'],MobilePlaybackRate:['MobilePlaybackRate','PlaybackRateEntry'],PlaybackSettings:['PlaybackSettings'],SleepTimer:['SleepTimerEntry'],MetadataDialog:['MetadataDialog'],PlayingVideoReplacement:['PlayingVideoReplacement'],TouchOptions:['TouchOptions'],MobilePartsPage:['MobilePartsPage'],CommentsPanel:['CommentsPanel'],LyricsChooser:['LyricsChooser'],DanmakuCanvas:['DanmakuCanvas'],SyncedVideo:['SyncedVideo'],LyricsBiasControl:['LyricsBiasControl']}))mocks[module]=names.map(n=>`export const ${n}=()=>null;`).join('')
 
@@ -30,11 +30,11 @@ async function renderer(mobile){
   b.onLoad({filter:/.*/,namespace:'fixture'},args=>({contents:mocks[args.path],loader:'js'}))
  }}]})
  const m={exports:{}};new Function('require','module','exports',bundle.outputFiles[0].text)(createRequire(import.meta.url),m,m.exports)
- return (compact,mode,fullscreenRequested=false,chapters={items:[],directoryOpen:false})=>{
+ return (compact,mode,fullscreenRequested=false,chapters={items:[],directoryOpen:false},coverUrl)=>{
   globalThis.mediaLayout.compact=compact
   globalThis.document={getElementById:()=>null}
   globalThis.localStorage={getItem:key=>key==='lyrics-media-mode'?mode:null}
-  globalThis.mediaLayout.state={current:{id:'bilibili:BV1GJ411x7h7:1',source:{provider:'bilibili',bvid:'BV1GJ411x7h7',cid:1,page:1,aid:1},title:'测试歌曲',durationSeconds:240},status:'paused',durationSeconds:240,progressSeconds:0}
+  globalThis.mediaLayout.state={current:{id:'bilibili:BV1GJ411x7h7:1',source:{provider:'bilibili',bvid:'BV1GJ411x7h7',cid:1,page:1,aid:1},title:'测试歌曲',coverUrl,durationSeconds:240},status:'paused',durationSeconds:240,progressSeconds:0}
   const client=new QueryClient({defaultOptions:{queries:{retry:false}}})
   try{return renderToStaticMarkup(createElement(QueryClientProvider,{client},createElement(m.exports.LyricsView,{chapters,fullscreenRequested,setVideoFullscreen(){},onOpenSleepTimer(){},onClose(){},onFavorite(){},favoritePending:false,onOpenCollection(){}})))}finally{client.clear()}
  }
@@ -53,6 +53,24 @@ function nodes(html){
 }
 const hasClass=(node,name)=>new RegExp(`class="[^"]*\\b${name}\\b`).test(node.attrs)
 const mobileRender=await renderer(true)
+test('the lyrics cover renders a placeholder and requests cold artwork immediately',()=>{
+ for(const compact of [true,false]){
+  const html=nodes(mobileRender(compact,'cover',false,undefined,'https://example.test/cold.jpg'))
+  const cover=html.find(n=>hasClass(n,'lyrics-cover'))
+  const artwork=cover.children.find(n=>hasClass(n,'artwork'))
+  assert.ok(artwork.children.some(n=>hasClass(n,'artwork-placeholder')))
+  assert.ok(artwork.children.some(n=>n.tag==='img'&&n.attrs.includes('loading="eager"')))
+  assert.ok(!artwork.attrs.includes('data-artwork-loaded'))
+  assert.ok(html.some(n=>hasClass(n,'lyrics-track-meta')))
+ }
+})
+test('the lyrics cover reuses the list thumbnail and enqueues the original at low priority',()=>{
+ const original='https://i1.hdslb.com/bfs/archive/example.jpg'
+ const markup=mobileRender(true,'cover',false,undefined,original)
+ const images=nodes(markup).filter(n=>n.tag==='img')
+ assert.ok(images.some(n=>hasClass(n,'artwork-preview')&&n.attrs.includes(`${original}@160w.jpg`)))
+ assert.ok(images.some(n=>hasClass(n,'artwork-original')&&n.attrs.includes(`src="${original}"`)&&/fetchpriority="low"/i.test(n.attrs)))
+})
 test('tablet cover and video controls use the same external media-stage toolbar as desktop',()=>{
  const video=nodes(mobileRender(false,'video')),tools=video.find(n=>hasClass(n,'video-tools'))
  assert.ok(hasClass(tools.parent,'lyrics-media'))
@@ -119,6 +137,23 @@ test('desktop lyrics use the same transport spacing as the main dock',()=>{
  assert.match(lyrics,sharedRows)
 })
 
+test('Android tablet browsing keeps its top inset during the lyrics fade',()=>{
+ const css=readFileSync(new URL('../src/styles/tablet.css',import.meta.url),'utf8')
+ const shell=':root[data-android-tablet-insets] .app-shell'
+ assert.ok(css.includes(`${shell} {\n  padding-top: var(--native-safe-top, 0px);`))
+ assert.ok(css.includes(`${shell} > .content-stage { padding-top: 0; }`))
+ assert.ok(css.includes(`${shell} > .rail { padding-top: 18px; }`))
+ assert.ok(css.includes(`${shell} > .library-panel { padding-top: 22px; }`))
+})
+
+test('tablet dock shares one track slot and keeps its action fade target rendered',()=>{
+ const css=readFileSync(new URL('../src/styles/interaction-motion.css',import.meta.url),'utf8')
+ assert.match(css,/\[data-wide-tablet-dock\] > \.dock-track-group\s*\{\s*grid-area:1\/1/)
+ assert.match(css,/\[data-wide-tablet-dock\] \.lyrics-dock-actions:empty\s*\{\s*display:flex/)
+ assert.match(css,/\.player-dock\[data-dock-crossfade\]::before\s*\{[^}]*border-top:1px solid var\(--dock-divider\)/)
+ assert.match(css,/\[data-wide-tablet-dock\] \.lyrics-dock-actions\s*\{\s*transition:opacity/)
+})
+
 test('mobile chapter sheets use the resting comments height and respect the safe area',()=>{
  const chapters=readFileSync(new URL('../src/features/chapters/chapters.css',import.meta.url),'utf8')
  const comments=readFileSync(new URL('../src/styles/components/comments.css',import.meta.url),'utf8')
@@ -127,4 +162,12 @@ test('mobile chapter sheets use the resting comments height and respect the safe
  assert.match(rule,/max-height:min\(var\(--bottom-sheet-resting-height\),var\(--chapter-sheet-safe-height\)\)/)
  assert.match(comments,/height:var\(--comments-collapsed-height,var\(--bottom-sheet-resting-height\)\)/)
  assert.match(comments,/\[data-chapter-editor\]\s*\{ height:var\(--bottom-sheet-resting-height\)/)
+})
+
+test('the replacement sheet caps its resting and keyboard heights below the native safe area', () => {
+ const css = readFileSync(new URL('../src/styles/components/import-matching.css', import.meta.url), 'utf8')
+ const rule = css.match(/^\.collection-dialog-sheet-layer > \.collection-dialog\.replacement-dialog\.collection-dialog-mobile-sheet\s*\{([^}]+)\}/m)?.[1] ?? ''
+ assert.match(rule, /--replacement-safe-height:[^;]*--native-safe-top[^;]*--visible-top/)
+ assert.match(rule, /max-height:min\(var\(--bottom-sheet-resting-height,[^;]+var\(--replacement-safe-height\)/)
+ assert.match(css, /\[data-keyboard-open\][^{}]*\.replacement-dialog\.collection-dialog-mobile-sheet\s*\{[^}]*max-height:var\(--replacement-safe-height\)/)
 })

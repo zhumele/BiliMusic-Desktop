@@ -406,7 +406,9 @@ fn tag_key(label: &str) -> (String, &str) {
     match lower.as_str() {
         "原创曲" | "原创歌曲" => ("原创歌曲".into(), "原创歌曲"),
         "翻彈" | "翻弹" => ("翻弹".into(), "翻弹"),
-        "ost" | "soundtrack" | "原聲帶" | "原声带" | "原声配乐" => ("原声配乐".into(), "原声配乐"),
+        "ost" | "soundtrack" | "原聲帶" | "原声带" | "原声配乐" => {
+            ("原声配乐".into(), "原声配乐")
+        }
         "vocaloid" => ("vocaloid".into(), "VOCALOID"),
         _ => (lower, label),
     }
@@ -418,25 +420,43 @@ pub(crate) async fn hydrate_tags(
 ) -> Result<usize, String> {
     use crate::infrastructure::{database::account_session, providers::bilibili::valid_bvid};
     static HYDRATING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    let Ok(_running) = HYDRATING.try_lock() else { return Ok(0) };
+    let Ok(_running) = HYDRATING.try_lock() else {
+        return Ok(0);
+    };
     let (session, candidates) = {
         let c = database.0.lock().map_err(|_| "数据库正忙")?;
         let session = account_session(&c).map_err(err)?;
         let items = buckets(&c)?;
         let mut scores = Seconds::new();
         for (id, seconds) in items.into_iter().flat_map(|bucket| bucket.tracks) {
-            let Some(bvid) = id.strip_prefix("bilibili:").and_then(|id| id.split_once(':')).map(|(bvid, _)| bvid) else { continue };
+            let Some(bvid) = id
+                .strip_prefix("bilibili:")
+                .and_then(|id| id.split_once(':'))
+                .map(|(bvid, _)| bvid)
+            else {
+                continue;
+            };
             if valid_bvid(bvid) && seconds > 0.0 {
                 *scores.entry(bvid.into()).or_default() += seconds;
             }
         }
-        let mut checked = c.prepare("SELECT substr(key,11) FROM sync_info WHERE key LIKE 'bili-tags:%'
+        let mut checked = c
+            .prepare(
+                "SELECT substr(key,11) FROM sync_info WHERE key LIKE 'bili-tags:%'
             AND (COALESCE(json_extract(value,'$.checked'),0)>unixepoch()-2592000
-                OR COALESCE(json_extract(value,'$.attempted'),0)>unixepoch()-1800)").map_err(err)?;
-        let checked = checked.query_map([], |r| r.get::<_, String>(0)).map_err(err)?
-            .collect::<rusqlite::Result<std::collections::HashSet<_>>>().map_err(err)?;
-        let mut candidates: Vec<_> = scores.into_iter().filter(|(bvid,_)| !checked.contains(bvid)).collect();
-        candidates.sort_by(|a,b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+                OR COALESCE(json_extract(value,'$.attempted'),0)>unixepoch()-1800)",
+            )
+            .map_err(err)?;
+        let checked = checked
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(err)?
+            .collect::<rusqlite::Result<std::collections::HashSet<_>>>()
+            .map_err(err)?;
+        let mut candidates: Vec<_> = scores
+            .into_iter()
+            .filter(|(bvid, _)| !checked.contains(bvid))
+            .collect();
+        candidates.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
         (session, candidates)
     };
     let mut changed = 0;
@@ -447,30 +467,64 @@ pub(crate) async fn hydrate_tags(
                 return Ok(0);
             }
         }
-        let result = tokio::time::timeout(std::time::Duration::from_secs(4), provider.video_tags(&bvid)).await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            provider.video_tags(&bvid),
+        )
+        .await;
         if matches!(&result, Ok(Err(error)) if error.is_request_restricted()) {
             break;
         }
         let c = database.0.lock().map_err(|_| "数据库正忙")?;
-        if account_session(&c).map_err(err)? != session { return Ok(0); }
+        if account_session(&c).map_err(err)? != session {
+            return Ok(0);
+        }
         let tags = result.ok().and_then(Result::ok).map(|tags| {
             let mut seen = std::collections::HashSet::new();
-            tags.iter().map(|label| tag_key(label))
-                .filter(|(key,label)| !key.is_empty() && label.chars().count() <= 40 && seen.insert(key.clone()))
-                .take(20).map(|(_,label)| label.to_owned()).collect::<Vec<_>>()
+            tags.iter()
+                .map(|label| tag_key(label))
+                .filter(|(key, label)| {
+                    !key.is_empty() && label.chars().count() <= 40 && seen.insert(key.clone())
+                })
+                .take(20)
+                .map(|(_, label)| label.to_owned())
+                .collect::<Vec<_>>()
         });
-        let mut cached = c.query_row("SELECT value FROM sync_info WHERE key=?1", [format!("bili-tags:{bvid}")], |r| r.get::<_, String>(0))
-            .optional().map_err(err)?.and_then(|value| serde_json::from_str::<Value>(&value).ok()).unwrap_or_else(|| json!({}));
+        let mut cached = c
+            .query_row(
+                "SELECT value FROM sync_info WHERE key=?1",
+                [format!("bili-tags:{bvid}")],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(err)?
+            .and_then(|value| serde_json::from_str::<Value>(&value).ok())
+            .unwrap_or_else(|| json!({}));
         let succeeded = tags.is_some();
         if let Some(tags) = tags {
             let next = json!(tags);
-            if cached.get("tags") != Some(&next) { changed += 1; }
+            if cached.get("tags") != Some(&next) {
+                changed += 1;
+            }
             cached["tags"] = next;
         }
-        c.execute("INSERT INTO sync_info(key,value) VALUES(?1,json_set(?2,?3,unixepoch()))
+        c.execute(
+            "INSERT INTO sync_info(key,value) VALUES(?1,json_set(?2,?3,unixepoch()))
             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            params![format!("bili-tags:{bvid}"),cached.to_string(),if succeeded { "$.checked" } else { "$.attempted" }]).map_err(err)?;
-        if !succeeded { break; }
+            params![
+                format!("bili-tags:{bvid}"),
+                cached.to_string(),
+                if succeeded {
+                    "$.checked"
+                } else {
+                    "$.attempted"
+                }
+            ],
+        )
+        .map_err(err)?;
+        if !succeeded {
+            break;
+        }
     }
     Ok(changed)
 }
@@ -488,11 +542,23 @@ fn preferences(
          LEFT JOIN metadata_overrides m ON m.track_id=t.id WHERE t.id=?1",
         )
         .map_err(err)?;
-    let mut tag_query = c.prepare("SELECT substr(key,11),json_extract(value,'$.tags') FROM sync_info
-        WHERE key LIKE 'bili-tags:%' AND json_type(value,'$.tags')='array'").map_err(err)?;
-    let tags = tag_query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).map_err(err)?
-        .filter_map(|row| row.ok().and_then(|(bvid,value)| serde_json::from_str::<Vec<String>>(&value).ok().map(|tags| (bvid,tags))))
-        .collect::<BTreeMap<_,_>>();
+    let mut tag_query = c
+        .prepare(
+            "SELECT substr(key,11),json_extract(value,'$.tags') FROM sync_info
+        WHERE key LIKE 'bili-tags:%' AND json_type(value,'$.tags')='array'",
+        )
+        .map_err(err)?;
+    let tags = tag_query
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(err)?
+        .filter_map(|row| {
+            row.ok().and_then(|(bvid, value)| {
+                serde_json::from_str::<Vec<String>>(&value)
+                    .ok()
+                    .map(|tags| (bvid, tags))
+            })
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut artists = BTreeMap::<String, (String, f64)>::new();
     let mut uploaders = BTreeMap::<String, (String, f64)>::new();
     let mut themes = BTreeMap::<String, (String, f64)>::new();
@@ -545,8 +611,14 @@ fn preferences(
                 .unwrap_or_else(|| format!("name:{}", uploader.trim().to_lowercase()));
             add(&mut uploaders, key, uploader.trim(), seconds);
         }
-        let bvid = track.strip_prefix("bilibili:").and_then(|id| id.split_once(':')).map(|(bvid, _)| bvid);
-        if let Some(labels) = bvid.and_then(|bvid| tags.get(bvid)).filter(|labels| !labels.is_empty()) {
+        let bvid = track
+            .strip_prefix("bilibili:")
+            .and_then(|id| id.split_once(':'))
+            .map(|(bvid, _)| bvid);
+        if let Some(labels) = bvid
+            .and_then(|bvid| tags.get(bvid))
+            .filter(|labels| !labels.is_empty())
+        {
             theme_seconds += seconds;
             let mut seen = std::collections::HashSet::new();
             for label in labels {
@@ -653,10 +725,14 @@ fn preferences_include_tracks_outside_the_top_fifty_and_keep_artist_and_uploader
 fn video_tags_merge_aliases_and_are_weighted_across_parts() {
     let c = Connection::open_in_memory().unwrap();
     crate::infrastructure::migrations::migrate(&c).unwrap();
-    c.execute("INSERT INTO sync_info VALUES(?1,?2)", params![
-        "bili-tags:BV17J411z74y",
-        json!({"tags": ["原创曲", "原创歌曲", "VOCALOID", "电子音乐"]}).to_string(),
-    ]).unwrap();
+    c.execute(
+        "INSERT INTO sync_info VALUES(?1,?2)",
+        params![
+            "bili-tags:BV17J411z74y",
+            json!({"tags": ["原创曲", "原创歌曲", "VOCALOID", "电子音乐"]}).to_string(),
+        ],
+    )
+    .unwrap();
     let tracks = Seconds::from([
         ("bilibili:BV17J411z74y:1".into(), 50.0),
         ("bilibili:BV17J411z74y:2".into(), 70.0),
@@ -807,8 +883,8 @@ pub async fn listening_sync_configure(
     pause_account_sync(&database, &uid, !enabled)
 }
 
-async fn account_credentials(
-    app: &AppHandle,
+async fn account_credentials<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     db: &Database,
     state: &SyncState,
     cfg: &super::Config,
@@ -826,7 +902,7 @@ async fn account_credentials(
         let credentials: transport::Secret = serde_json::from_str(&value).map_err(err)?;
         let response = super::traffic::send(
             transport::client()?
-                .get(transport::endpoint(cfg)?.replace("/vault", "/statistics/"))
+                .get(super::cloud_transport::endpoint(cfg)?.replace("/vault", "/statistics/"))
                 .bearer_auth(&credentials.password),
         )
         .await
@@ -862,8 +938,8 @@ async fn account_credentials(
 }
 
 #[tauri::command]
-pub async fn listening_sync(
-    app: AppHandle,
+pub async fn listening_sync<R: tauri::Runtime>(
+    app: AppHandle<R>,
     database: State<'_, Database>,
     state: State<'_, SyncState>,
     automatic: Option<bool>,
@@ -876,19 +952,24 @@ pub async fn listening_sync(
         return Ok(false);
     }
     super::background::run(
-        app.try_state::<crate::infrastructure::diagnostics::Diagnostics>().map(|state| state.inner().clone()),
+        app.try_state::<crate::infrastructure::diagnostics::Diagnostics>()
+            .map(|state| state.inner().clone()),
         &database,
         &state,
         super::scheduler::Domain::Statistics,
         automatic.unwrap_or(false),
-        Box::pin(listening_sync_inner(app.clone(), database.clone(), state.clone())),
+        Box::pin(listening_sync_inner(
+            app.clone(),
+            database.clone(),
+            state.clone(),
+        )),
         |_| (false, false, false),
     )
     .await
     .map(|result| result.unwrap_or(false))
 }
-async fn listening_sync_inner(
-    app: AppHandle,
+async fn listening_sync_inner<R: tauri::Runtime>(
+    app: AppHandle<R>,
     database: State<'_, Database>,
     state: State<'_, SyncState>,
 ) -> Result<bool, String> {
@@ -898,6 +979,9 @@ async fn listening_sync_inner(
         let Some(cfg) = account_config(&database)? else {
             return Ok(false);
         };
+        if !matches!(cfg.provider.as_str(), "webdav" | "cloud") {
+            return Err("未知的同步服务".into());
+        }
         let cancellation = tokio_util::sync::CancellationToken::new();
         *state.statistics_active.lock().map_err(err)? = Some(cancellation.clone());
         (cfg, cancellation)
@@ -908,7 +992,7 @@ async fn listening_sync_inner(
         if cfg.provider == "webdav" {
             super::statistics_v2::exchange(&database, &cfg, &credentials).await
         } else {
-            exchange(&database, &cfg, &credentials, &base).await
+            exchange_cloud(&database, &cfg, &credentials, &base).await
         }
     };
     let result =
@@ -936,7 +1020,7 @@ fn statistics_endpoint(cfg: &super::Config) -> Result<String, String> {
     if cfg.provider == "webdav" {
         v2_endpoint(cfg)
     } else {
-        Ok(transport::endpoint(cfg)?.replace("/vault", "/statistics/"))
+        Ok(super::cloud_transport::endpoint(cfg)?.replace("/vault", "/statistics/"))
     }
 }
 pub(super) fn v2_endpoint(cfg: &super::Config) -> Result<String, String> {
@@ -947,7 +1031,7 @@ pub(super) fn v2_endpoint(cfg: &super::Config) -> Result<String, String> {
         super::migration::Genesis::for_config(cfg)?.vault
     ))
 }
-async fn exchange(
+async fn exchange_cloud(
     db: &Database,
     cfg: &super::Config,
     secret: &transport::Secret,
@@ -955,38 +1039,13 @@ async fn exchange(
 ) -> Result<(), String> {
     let http = transport::client()?;
     let request = |method: &str, url: String| {
-        let r = http
-            .request(reqwest::Method::from_bytes(method.as_bytes()).unwrap(), url)
+        http.request(reqwest::Method::from_bytes(method.as_bytes()).unwrap(), url)
             .header(
                 "User-Agent",
                 concat!("BiliMusic/", env!("CARGO_PKG_VERSION")),
-            );
-        if cfg.provider == "webdav" {
-            r.basic_auth(&secret.username, Some(&secret.password))
-        } else {
-            r.bearer_auth(&secret.password)
-        }
+            )
+            .bearer_auth(&secret.password)
     };
-    if cfg.provider == "webdav" {
-        // Statistics may run before the first library merge; create our parents as well.
-        let (account, _) = base
-            .trim_end_matches('/')
-            .rsplit_once('/')
-            .ok_or("统计目录无效")?;
-        let (application, _) = account.rsplit_once('/').ok_or("统计目录无效")?;
-        for folder in [
-            format!("{application}/"),
-            format!("{account}/"),
-            base.to_owned(),
-        ] {
-            let r = super::traffic::send(request("MKCOL", folder))
-                .await
-                .map_err(err)?;
-            if !r.status().is_success() && r.status().as_u16() != 405 {
-                return Err(format!("统计目录创建失败：HTTP {}", r.status().as_u16()));
-            }
-        }
-    }
     let (source, local, cutoff) = {
         let c = db.0.lock().map_err(err)?;
         active(db, &cfg.uid)?;
@@ -1055,14 +1114,6 @@ async fn exchange(
         }
         let bytes = encode(&b)?;
         uploaded += bytes.len() as u64;
-        if cfg.provider == "webdav" {
-            let r = super::traffic::send(request("MKCOL", format!("{base}{source}/")))
-                .await
-                .map_err(err)?;
-            if !r.status().is_success() && r.status().as_u16() != 405 {
-                return Err("无法创建统计来源目录".into());
-            }
-        }
         let r = super::traffic::send(
             request("PUT", format!("{base}{source}/{}.json.gz", b.month))
                 .header("Content-Type", "application/gzip")
@@ -1123,54 +1174,14 @@ async fn exchange(
         active(db, &cfg.uid)?;
         put_meta(&c, &published_key, &index_json)?;
     }
+    let response = super::traffic::send(request("GET", base.to_owned()))
+        .await
+        .map_err(err)?;
+    if !response.status().is_success() {
+        return Err("云端统计接口暂不可用，请更新同步服务".into());
+    }
     let sources: Vec<String> =
-        if cfg.provider == "webdav" {
-            let r = super::traffic::send(request("PROPFIND", base.to_owned())
-            .header("Depth", "1")
-            .header("Content-Type", "application/xml")
-            .body("<d:propfind xmlns:d=\"DAV:\"><d:prop><d:resourcetype/></d:prop></d:propfind>"))
-            .await
-            .map_err(err)?;
-            if !r.status().is_success() {
-                return Err("统计目录读取失败".into());
-            }
-            let data = response_bytes(r).await?;
-            downloaded += data.len() as u64;
-            let mut reader = quick_xml::Reader::from_reader(data.as_slice());
-            let mut href = false;
-            let mut ids = Vec::new();
-            loop {
-                match reader.read_event() {
-                    Ok(quick_xml::events::Event::Start(e)) => {
-                        href = e.local_name().as_ref() == b"href"
-                    }
-                    Ok(quick_xml::events::Event::Text(e)) if href => {
-                        let text = e.decode().map_err(err)?;
-                        let name = text.rsplit('/').next().unwrap_or("");
-                        if let Some(id) = name
-                            .strip_prefix("index-")
-                            .and_then(|s| s.strip_suffix(".json"))
-                        {
-                            if uuid::Uuid::parse_str(id).is_ok() {
-                                ids.push(id.to_string())
-                            }
-                        }
-                    }
-                    Ok(quick_xml::events::Event::Eof) => break,
-                    Err(e) => return Err(err(e)),
-                    _ => {}
-                }
-            }
-            ids
-        } else {
-            let r = super::traffic::send(request("GET", base.to_owned()))
-                .await
-                .map_err(err)?;
-            if !r.status().is_success() {
-                return Err("云端统计接口暂不可用，请更新同步服务".into());
-            }
-            serde_json::from_slice(&response_bytes(r).await?).map_err(err)?
-        };
+        serde_json::from_slice(&response_bytes(response).await?).map_err(err)?;
     if sources.len() > 100 {
         return Err("统计来源超过100个".into());
     }
@@ -1299,8 +1310,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
-    struct DavFixture {
-        folders: std::collections::BTreeSet<String>,
+    struct CloudFixture {
         files: BTreeMap<String, Vec<u8>>,
         fail_index_once: bool,
         uploads: usize,
@@ -1308,15 +1318,14 @@ mod tests {
         month_started: Arc<tokio::sync::Notify>,
         continue_month: Arc<tokio::sync::Notify>,
     }
-    async fn dav_request(
-        HttpState(state): HttpState<Arc<Mutex<DavFixture>>>,
+    async fn cloud_request(
+        HttpState(state): HttpState<Arc<Mutex<CloudFixture>>>,
         OriginalUri(uri): OriginalUri,
         method: Method,
         headers: HeaderMap,
         body: Bytes,
     ) -> Response {
-        if headers.get("authorization").and_then(|v| v.to_str().ok()) != Some("Basic dGVzdDpwYXNz")
-        {
+        if headers.get("authorization").and_then(|v| v.to_str().ok()) != Some("Bearer pass") {
             return StatusCode::UNAUTHORIZED.into_response();
         }
         let path = uri.path().to_owned();
@@ -1334,44 +1343,7 @@ mod tests {
             resume.notified().await;
         }
         let mut state = state.lock().unwrap();
-        if method.as_str() == "MKCOL" {
-            if state.folders.contains(&path) {
-                return StatusCode::METHOD_NOT_ALLOWED.into_response();
-            }
-            let parent = format!(
-                "{}/",
-                path.trim_end_matches('/').rsplit_once('/').unwrap().0
-            );
-            if !state.folders.contains(&parent) {
-                return StatusCode::CONFLICT.into_response();
-            }
-            state.folders.insert(path);
-            return StatusCode::CREATED.into_response();
-        }
-        if method.as_str() == "PROPFIND" {
-            if !state.folders.contains(&path) {
-                return StatusCode::NOT_FOUND.into_response();
-            }
-            let files: String = state
-                .files
-                .keys()
-                .filter(|key| {
-                    key.strip_prefix(&path)
-                        .is_some_and(|rest| !rest.contains('/'))
-                })
-                .map(|key| format!("<d:response><d:href>{key}</d:href></d:response>"))
-                .collect();
-            return (
-                StatusCode::MULTI_STATUS,
-                format!("<d:multistatus xmlns:d=\"DAV:\">{files}</d:multistatus>"),
-            )
-                .into_response();
-        }
         if method == Method::PUT {
-            let parent = format!("{}/", path.rsplit_once('/').unwrap().0);
-            if !state.folders.contains(&parent) {
-                return StatusCode::CONFLICT.into_response();
-            }
             if path.contains("/index-") && state.fail_index_once {
                 state.fail_index_once = false;
                 return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -1381,6 +1353,17 @@ mod tests {
             return StatusCode::CREATED.into_response();
         }
         if method == Method::GET {
+            if path.ends_with('/') {
+                let sources = state
+                    .files
+                    .keys()
+                    .filter_map(|key| {
+                        let file = key.strip_prefix(&path)?;
+                        file.strip_prefix("index-")?.strip_suffix(".json")
+                    })
+                    .collect::<Vec<_>>();
+                return axum::Json(sources).into_response();
+            }
             let Some(body) = state.files.get(&path) else {
                 return StatusCode::NOT_FOUND.into_response();
             };
@@ -1392,14 +1375,17 @@ mod tests {
         }
         StatusCode::METHOD_NOT_ALLOWED.into_response()
     }
-    async fn dav_server() -> (String, Arc<Mutex<DavFixture>>, tokio::task::JoinHandle<()>) {
-        let state = Arc::new(Mutex::new(DavFixture::default()));
-        state.lock().unwrap().folders.insert("/dav/".into());
+    async fn cloud_server() -> (
+        String,
+        Arc<Mutex<CloudFixture>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let state = Arc::new(Mutex::new(CloudFixture::default()));
         let router = Router::new()
-            .fallback(dav_request)
+            .fallback(cloud_request)
             .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let root = format!("http://{}/dav", listener.local_addr().unwrap());
+        let root = format!("http://{}/statistics", listener.local_addr().unwrap());
         let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         (root, state, task)
     }
@@ -1434,9 +1420,10 @@ mod tests {
             .unwrap()
     }
     async fn sync_device(db: &Database, root: &str, uid: &str) -> Result<(), String> {
-        let cfg = account_config(db)?.ok_or("account statistics unavailable")?;
-        let base = format!("{root}/BiliMusic-sync-v1/{uid}/statistics-v1/");
-        exchange(
+        let mut cfg = account_config(db)?.ok_or("account statistics unavailable")?;
+        cfg.provider = "cloud".into();
+        let base = format!("{root}/{uid}/");
+        exchange_cloud(
             db,
             &cfg,
             &transport::Secret {
@@ -1450,12 +1437,12 @@ mod tests {
 
     #[tokio::test]
     async fn four_devices_share_account_totals_with_offline_catchup_and_no_duplicate_uploads() {
-        let (root, server, task) = dav_server().await;
+        let (root, server, task) = cloud_server().await;
         let devices: Vec<_> = (0..4).map(|_| device("42")).collect();
         for (i, db) in devices.iter().enumerate() {
             sample(db, "42", (i + 1) as f64 * 60.0);
         }
-        // Empty WebDAV has no library parents yet. Statistics must still initialize and sync.
+        // Each client has local statistics before its first cloud sync.
         for db in &devices {
             sync_device(db, &root, "42").await.unwrap();
         }
@@ -1482,7 +1469,7 @@ mod tests {
             sync_device(db, &root, "42").await.unwrap();
             assert!((total(db, "42") - 630.0).abs() < 0.001);
         }
-        // Another Bilibili account in the same WebDAV account is isolated.
+        // Another Bilibili account on the same server is isolated.
         let other = device("43");
         sample(&other, "43", 300.0);
         sync_device(&other, &root, "43").await.unwrap();
@@ -1498,7 +1485,7 @@ mod tests {
     #[tokio::test]
     async fn failed_index_retries_without_readding_month_and_library_pause_does_not_block_statistics()
      {
-        let (root, server, task) = dav_server().await;
+        let (root, server, task) = cloud_server().await;
         let a = device("42");
         let b = device("42");
         sample(&a, "42", 60.0);
@@ -1528,7 +1515,7 @@ mod tests {
 
     #[tokio::test]
     async fn listening_during_upload_stays_pending_until_its_revision_is_published() {
-        let (root, server, task) = dav_server().await;
+        let (root, server, task) = cloud_server().await;
         let a = Arc::new(device("42"));
         let b = device("42");
         sample(&a, "42", 60.0);

@@ -1,5 +1,10 @@
+#[path = "bilibili_account.rs"]
+mod account;
 #[path = "bilibili_audio.rs"]
 mod audio;
+#[path = "bilibili_comments.rs"]
+mod comments;
+pub use comments::{CommentItem, CommentPage};
 #[path = "bilibili_creators.rs"]
 mod creators;
 #[cfg(test)]
@@ -7,20 +12,23 @@ pub(crate) use audio::prefer_progressive_startup;
 use audio::*;
 #[path = "bilibili_extras.rs"]
 mod extras;
+#[path = "bilibili_feed.rs"]
+mod feed;
+pub use feed::FeedPage;
 #[path = "bilibili_requests.rs"]
 mod requests;
-pub(crate) use requests::{Priority as RequestPriority, initialize as initialize_requests};
+#[path = "bilibili_wbi.rs"]
+mod wbi;
 pub use extras::*;
+pub(crate) use requests::{Priority as RequestPriority, initialize as initialize_requests};
 use reqwest::{
     Client, Url,
     cookie::{CookieStore, Jar},
-    header::{
-        ACCEPT, ACCEPT_LANGUAGE, COOKIE, HeaderMap, HeaderValue, ORIGIN, REFERER, SET_COOKIE,
-    },
+    header::{ACCEPT, ACCEPT_LANGUAGE, COOKIE, HeaderMap, HeaderValue, ORIGIN, REFERER},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -363,173 +371,12 @@ impl CollectedFoldersData {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CommentPage {
-    pub items: Vec<CommentItem>,
-    pub next: i64,
-    pub is_end: bool,
-    pub total: i64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CommentItem {
-    pub id: i64,
-    pub root_id: i64,
-    pub id_text: String,
-    pub root_id_text: String,
-    pub parent_id: i64,
-    pub user_id: i64,
-    pub user_name: String,
-    pub avatar_url: String,
-    pub message: String,
-    pub emotes: std::collections::HashMap<String, String>,
-    pub created_at: i64,
-    pub like_count: i64,
-    pub liked: bool,
-    pub reply_count: i64,
-    pub replies: Vec<CommentItem>,
-}
-
 #[derive(Deserialize)]
 struct Envelope<T> {
     code: i64,
     #[serde(default)]
     message: String,
     data: Option<T>,
-}
-
-#[derive(Deserialize)]
-struct QrGenerateData {
-    url: String,
-    qrcode_key: String,
-}
-
-#[derive(Deserialize)]
-struct QrPollData {
-    code: i64,
-    #[serde(default)]
-    message: String,
-}
-
-#[derive(Deserialize)]
-struct NavData {
-    #[serde(default, rename = "isLogin")]
-    is_login: bool,
-    #[serde(default)]
-    mid: i64,
-    #[serde(default)]
-    uname: String,
-    #[serde(default)]
-    face: String,
-    #[serde(default, rename = "level_info")]
-    level: Option<NavLevel>,
-    #[serde(default)]
-    is_senior_member: Option<i64>,
-    #[serde(default, rename = "vipStatus")]
-    vip_status: Option<i64>,
-    #[serde(default, rename = "vipType")]
-    vip_type: Option<i64>,
-    #[serde(default)]
-    vip_label: Option<NavVipLabel>,
-    #[serde(default)]
-    vip: Option<NavVip>,
-}
-
-#[derive(Deserialize)]
-struct NavLevel {
-    current_level: Option<i64>,
-}
-
-#[derive(Deserialize, Default)]
-struct NavVip {
-    #[serde(default)]
-    status: Option<i64>,
-    #[serde(default, rename = "type")]
-    kind: Option<i64>,
-    #[serde(default)]
-    label: Option<NavVipLabel>,
-}
-
-#[derive(Deserialize, Default)]
-struct NavVipLabel {
-    #[serde(default)]
-    text: Option<String>,
-    #[serde(default)]
-    label_theme: Option<String>,
-}
-
-#[derive(Deserialize, Default)]
-struct ReplyData {
-    #[serde(default)]
-    replies: Option<Vec<RawReply>>,
-    #[serde(default)]
-    top_replies: Option<Vec<RawReply>>,
-    #[serde(default)]
-    upper: Option<ReplyUpper>,
-    #[serde(default)]
-    page: ReplyPageMeta,
-}
-
-#[derive(Deserialize)]
-struct ReplyUpper {
-    top: Option<RawReply>,
-}
-
-#[derive(Deserialize, Default)]
-struct ReplyPageMeta {
-    #[serde(default)]
-    acount: i64,
-    #[serde(default)]
-    num: i64,
-    #[serde(default)]
-    size: i64,
-    #[serde(default)]
-    count: i64,
-}
-
-#[derive(Deserialize)]
-struct RawReply {
-    rpid: i64,
-    #[serde(default)]
-    root: i64,
-    #[serde(default)]
-    parent: i64,
-    #[serde(default, rename = "like")]
-    like_count: i64,
-    #[serde(default)]
-    action: i64,
-    #[serde(default)]
-    ctime: i64,
-    #[serde(default)]
-    rcount: i64,
-    member: ReplyMember,
-    content: ReplyContent,
-    #[serde(default)]
-    replies: Option<Vec<RawReply>>,
-}
-
-#[derive(Deserialize)]
-struct ReplyMember {
-    #[serde(default)]
-    mid: String,
-    #[serde(default)]
-    uname: String,
-    #[serde(default)]
-    avatar: String,
-}
-#[derive(Deserialize)]
-struct ReplyContent {
-    #[serde(default)]
-    message: String,
-    emote: Option<std::collections::HashMap<String, ReplyEmote>>,
-}
-
-#[derive(Deserialize)]
-struct ReplyEmote {
-    #[serde(default)]
-    url: String,
 }
 
 #[derive(Deserialize)]
@@ -826,9 +673,19 @@ impl BilibiliProvider {
     }
 
     pub async fn set_session_cookie(&self, cookie: Option<String>) {
+        let _: Result<(), std::convert::Infallible> =
+            self.commit_session_cookie(cookie, || Ok(())).await;
+    }
+
+    pub async fn commit_session_cookie<E>(
+        &self,
+        cookie: Option<String>,
+        commit: impl FnOnce() -> Result<(), E>,
+    ) -> Result<(), E> {
         let mut cache = self.dash_cache.write().await;
         {
             let mut session = self.session_cookie.write().await;
+            commit()?;
             *session = cookie;
             self.catalog_epoch.fetch_add(1, Ordering::Relaxed);
         }
@@ -837,100 +694,12 @@ impl BilibiliProvider {
         self.pages.write().await.clear();
         self.details.write().await.clear();
         self.player_metadata.write().await.clear();
-    }
-
-    pub async fn qr_login_generate(&self) -> Result<QrLogin, ProviderError> {
-        let data: QrGenerateData = self
-            .get_data(
-                Url::parse("https://passport.bilibili.com/x/passport-login/web/qrcode/generate")
-                    .expect("static login URL"),
-            )
-            .await?;
-        Ok(QrLogin {
-            key: data.qrcode_key,
-            url: data.url,
-        })
-    }
-
-    pub async fn qr_login_poll(&self, key: &str) -> Result<QrLoginStatus, ProviderError> {
-        let mut url = Url::parse("https://passport.bilibili.com/x/passport-login/web/qrcode/poll")
-            .expect("static login URL");
-        url.query_pairs_mut().append_pair("qrcode_key", key);
-        let (epoch, session) = self.request_session().await;
-        let lease = self.requests.acquire(requests::Stage::Account,
-            session_uid(session.as_deref()), RequestPriority::Background, true).await?;
-        self.check_request_epoch(epoch)?;
-        let response = self.client.get(url).send().await.map_err(safe_network_error)?;
-        let cookies = response
-            .headers()
-            .get_all(SET_COOKIE)
-            .iter()
-            .filter_map(|value| value.to_str().ok())
-            .filter_map(|value| value.split(';').next())
-            .collect::<Vec<_>>()
-            .join("; ");
-        let (status, headers, json) = response_json(response, &lease, false).await?;
-        let data: QrPollData = envelope_data(&lease, status, &headers, json, false)?;
-        self.check_request_epoch(epoch)?;
-        let status = match data.code {
-            0 => "authenticated",
-            86090 => "confirmed",
-            86101 => "waiting",
-            86038 => "expired",
-            _ => "error",
-        };
-        let cookie_header = if data.code == 0 && !cookies.is_empty() {
-            Some(cookies)
-        } else {
-            None
-        };
-        if let Some(cookie) = &cookie_header {
-            self.set_session_cookie(Some(cookie.clone())).await;
-        }
-        Ok(QrLoginStatus {
-            status: status.into(),
-            message: data.message,
-            cookie_header,
-        })
-    }
-
-    pub async fn account_profile(&self) -> Result<AccountProfile, ProviderError> {
-        self.account_profile_with_priority(RequestPriority::Foreground).await
-    }
-
-    pub async fn account_profile_with_priority(&self, priority: RequestPriority) -> Result<AccountProfile, ProviderError> {
-        if self.session_cookie.read().await.is_none() {
-            return Ok(AccountProfile {
-                logged_in: false,
-                user_id: None,
-                name: None,
-                avatar_url: None,
-                level: None,
-                senior_member: None,
-                vip_active: None,
-                vip_type: None,
-                vip_theme: None,
-                vip_label: None,
-            });
-        }
-        let data: NavData = self.get_data_with_priority(self.api_url("/x/web-interface/nav"), priority).await?;
-        Ok(account_profile_from_nav(data))
-    }
-
-    pub async fn comments(&self, aid: i64, next: i64) -> Result<CommentPage, ProviderError> {
-        let page_number = next.max(1);
-        let mut url = self.api_url("/x/v2/reply");
-        url.query_pairs_mut()
-            .append_pair("type", "1")
-            .append_pair("oid", &aid.to_string())
-            .append_pair("pn", &page_number.to_string())
-            .append_pair("sort", "2");
-        let data: ReplyData = self.get_data(url).await?;
-        Ok(comment_page_from_data(data, page_number))
+        Ok(())
     }
 
     pub async fn favorite_folders(&self) -> Result<Vec<FavoriteFolder>, ProviderError> {
-        self.check_favorite_requests(RequestPriority::Foreground).await?;
+        self.check_favorite_requests(RequestPriority::Foreground)
+            .await?;
         let profile = self.account_profile().await?;
         let uid = profile.user_id.ok_or(ProviderError::NotAuthenticated)?;
         self.favorite_folders_for(uid).await
@@ -940,11 +709,14 @@ impl BilibiliProvider {
         &self,
         uid: i64,
     ) -> Result<Vec<FavoriteFolder>, ProviderError> {
-        self.favorite_folders_for_with_priority(uid, RequestPriority::Foreground).await
+        self.favorite_folders_for_with_priority(uid, RequestPriority::Foreground)
+            .await
     }
 
     pub async fn favorite_folders_for_with_priority(
-        &self, uid: i64, priority: RequestPriority,
+        &self,
+        uid: i64,
+        priority: RequestPriority,
     ) -> Result<Vec<FavoriteFolder>, ProviderError> {
         let mut url = self.api_url("/x/v3/fav/folder/created/list-all");
         url.query_pairs_mut()
@@ -957,7 +729,8 @@ impl BilibiliProvider {
         &self,
         page: u32,
     ) -> Result<SubscribedSeasonPage, ProviderError> {
-        self.check_favorite_requests(RequestPriority::Foreground).await?;
+        self.check_favorite_requests(RequestPriority::Foreground)
+            .await?;
         let uid = self
             .account_profile()
             .await?
@@ -970,7 +743,8 @@ impl BilibiliProvider {
             .append_pair("pn", &page.to_string())
             .append_pair("ps", "20")
             .append_pair("platform", "web");
-        let data: CollectedFoldersData = self.favorite_data(url, RequestPriority::Foreground).await?;
+        let data: CollectedFoldersData =
+            self.favorite_data(url, RequestPriority::Foreground).await?;
         Ok(data.into_season_page(page))
     }
 
@@ -979,11 +753,15 @@ impl BilibiliProvider {
         folder_id: i64,
         page: u32,
     ) -> Result<FavoritePage, ProviderError> {
-        self.favorite_videos_with_priority(folder_id, page, RequestPriority::Foreground).await
+        self.favorite_videos_with_priority(folder_id, page, RequestPriority::Foreground)
+            .await
     }
 
     pub async fn favorite_videos_with_priority(
-        &self, folder_id: i64, page: u32, priority: RequestPriority,
+        &self,
+        folder_id: i64,
+        page: u32,
+        priority: RequestPriority,
     ) -> Result<FavoritePage, ProviderError> {
         let mut url = self.api_url("/x/v3/fav/resource/list");
         url.query_pairs_mut()
@@ -995,9 +773,16 @@ impl BilibiliProvider {
         self.favorite_data(url, priority).await
     }
 
-    pub async fn check_favorite_requests(&self, priority: RequestPriority) -> Result<(), ProviderError> {
+    pub async fn check_favorite_requests(
+        &self,
+        priority: RequestPriority,
+    ) -> Result<(), ProviderError> {
         let (_, session) = self.request_session().await;
-        self.requests.check_read(requests::Stage::Favorites, session_uid(session.as_deref()), priority)
+        self.requests.check_read(
+            requests::Stage::Favorites,
+            session_uid(session.as_deref()),
+            priority,
+        )
     }
 
     pub async fn change_favorite_video(
@@ -1021,85 +806,6 @@ impl BilibiliProvider {
             .post_data(self.api_url("/x/v3/fav/resource/deal"), &form)
             .await?;
         Ok(())
-    }
-
-    pub async fn comment_replies(
-        &self,
-        aid: i64,
-        root: i64,
-        page: u32,
-    ) -> Result<Vec<CommentItem>, ProviderError> {
-        Ok(self.comment_reply_page(aid, root, page).await?.items)
-    }
-
-    pub async fn comment_reply_page(
-        &self,
-        aid: i64,
-        root: i64,
-        page: u32,
-    ) -> Result<CommentPage, ProviderError> {
-        let mut url = self.api_url("/x/v2/reply/reply");
-        let requested = page.max(1);
-        url.query_pairs_mut()
-            .append_pair("type", "1")
-            .append_pair("oid", &aid.to_string())
-            .append_pair("root", &root.to_string())
-            .append_pair("pn", &requested.to_string())
-            .append_pair("ps", "20");
-        let data: ReplyData = self.get_data(url).await?;
-        Ok(comment_reply_page_from_data(data, i64::from(requested)))
-    }
-
-    pub async fn comment_like(
-        &self,
-        aid: i64,
-        reply_id: i64,
-        liked: bool,
-    ) -> Result<(), ProviderError> {
-        let csrf = self.csrf_token().await?;
-        let url = self.api_url("/x/v2/reply/action");
-        let form = [
-            ("type", "1".to_string()),
-            ("oid", aid.to_string()),
-            ("rpid", reply_id.to_string()),
-            ("action", if liked { "1" } else { "0" }.to_string()),
-            ("csrf", csrf),
-        ];
-        let _: serde_json::Value = self.post_data(url, &form).await?;
-        Ok(())
-    }
-
-    pub async fn comment_emotes(&self) -> Result<serde_json::Value, ProviderError> {
-        let mut url = self.api_url("/x/emote/user/panel/web");
-        url.query_pairs_mut().append_pair("business", "reply");
-        let mut defaults = self.api_url("/x/emote/package");
-        defaults
-            .query_pairs_mut()
-            .append_pair("business", "reply")
-            .append_pair("ids", "1,2");
-        let (personal, standard) = tokio::join!(
-            self.get_data::<serde_json::Value>(url),
-            self.get_data::<serde_json::Value>(defaults)
-        );
-        let mut packages = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        let mut success = false;
-        for data in [standard.as_ref(), personal.as_ref()].into_iter().flatten() {
-            success = true;
-            for pack in data["packages"].as_array().into_iter().flatten() {
-                if pack["emote"]
-                    .as_array()
-                    .is_some_and(|items| !items.is_empty())
-                    && seen.insert(pack["id"].clone())
-                {
-                    packages.push(pack.clone());
-                }
-            }
-        }
-        if !success {
-            return Err(personal.err().or_else(|| standard.err()).unwrap());
-        }
-        Ok(serde_json::json!({"packages": packages}))
     }
 
     pub async fn create_favorite_folder(
@@ -1131,32 +837,6 @@ impl BilibiliProvider {
         })
     }
 
-    pub async fn comment_reply(
-        &self,
-        aid: i64,
-        message: &str,
-        root: Option<i64>,
-        parent: Option<i64>,
-    ) -> Result<(), ProviderError> {
-        let csrf = self.csrf_token().await?;
-        let url = self.api_url("/x/v2/reply/add");
-        let mut form = vec![
-            ("type", "1".to_string()),
-            ("oid", aid.to_string()),
-            ("message", message.to_string()),
-            ("plat", "1".to_string()),
-            ("csrf", csrf),
-        ];
-        if let Some(root) = root {
-            form.push(("root", root.to_string()));
-        }
-        if let Some(parent) = parent {
-            form.push(("parent", parent.to_string()));
-        }
-        let _: serde_json::Value = self.post_data(url, &form).await?;
-        Ok(())
-    }
-
     pub async fn search_suggestions(&self, keyword: &str) -> Result<Vec<String>, ProviderError> {
         let keyword = keyword.trim();
         if keyword.is_empty()
@@ -1167,8 +847,15 @@ impl BilibiliProvider {
             return Ok(vec![]);
         }
         let (epoch, session) = self.request_session().await;
-        let lease = self.requests.acquire(requests::Stage::Search,
-            session_uid(session.as_deref()), RequestPriority::Background, true).await?;
+        let lease = self
+            .requests
+            .acquire(
+                requests::Stage::Search,
+                session_uid(session.as_deref()),
+                RequestPriority::Background,
+                true,
+            )
+            .await?;
         self.check_request_epoch(epoch)?;
         let response = self
             .client
@@ -1185,11 +872,20 @@ impl BilibiliProvider {
             .header(reqwest::header::REFERER, "https://search.bilibili.com/")
             .timeout(std::time::Duration::from_secs(3))
             .send()
-            .await.map_err(safe_network_error)?;
+            .await
+            .map_err(safe_network_error)?;
         let (status, headers, value) = response_json(response, &lease, false).await?;
-        let code = value["code"].as_i64().ok_or(ProviderError::UnexpectedResponse)?;
-        inspect_code(&lease, status, &headers, code, value.get("data"),
-            value["message"].as_str().unwrap_or_default().into())?;
+        let code = value["code"]
+            .as_i64()
+            .ok_or(ProviderError::UnexpectedResponse)?;
+        inspect_code(
+            &lease,
+            status,
+            &headers,
+            code,
+            value.get("data"),
+            value["message"].as_str().unwrap_or_default().into(),
+        )?;
         self.check_request_epoch(epoch)?;
         Ok(suggestion_words(&value))
     }
@@ -1301,7 +997,8 @@ impl BilibiliProvider {
         }
         lease.validate()?;
         // Complete the ordinary website cookie handshake before the search API call.
-        let response = self.authenticated_get_with(&self.client, web_url, session)
+        let response = self
+            .authenticated_get_with(&self.client, web_url, session)
             .header(ACCEPT, "text/html")
             .send()
             .await
@@ -1315,20 +1012,35 @@ impl BilibiliProvider {
     }
 
     async fn search_response(&self, url: Url, web_url: Url) -> Result<SearchData, ProviderError> {
-        self.get_data_for(url, requests::Stage::Search, RequestPriority::Foreground, Some(web_url)).await
+        self.get_data_for(
+            url,
+            requests::Stage::Search,
+            RequestPriority::Foreground,
+            Some(web_url),
+        )
+        .await
     }
 
     async fn video_detail(&self, bvid: &str) -> Result<DetailData, ProviderError> {
-        self.video_detail_with_priority(bvid, RequestPriority::Foreground).await
+        self.video_detail_with_priority(bvid, RequestPriority::Foreground)
+            .await
     }
 
-    async fn video_detail_with_priority(&self, bvid: &str, priority: RequestPriority) -> Result<DetailData, ProviderError> {
+    async fn video_detail_with_priority(
+        &self,
+        bvid: &str,
+        priority: RequestPriority,
+    ) -> Result<DetailData, ProviderError> {
         let mut url = self.api_url("/x/web-interface/view");
         url.query_pairs_mut().append_pair("bvid", bvid);
         self.get_data_with_priority(url, priority).await
     }
 
-    async fn charge_info_with_priority(&self, detail: &DetailData, priority: RequestPriority) -> Option<ChargeInfo> {
+    async fn charge_info_with_priority(
+        &self,
+        detail: &DetailData,
+        priority: RequestPriority,
+    ) -> Option<ChargeInfo> {
         if !detail.access.is_upower_exclusive {
             return None;
         }
@@ -1336,39 +1048,60 @@ impl BilibiliProvider {
         url.query_pairs_mut()
             .append_pair("aid", &detail.aid.to_string())
             .append_pair("mid", &detail.owner.mid.to_string());
-        tokio::time::timeout(Duration::from_secs(2), self.get_data_with_priority(url, priority))
-            .await
-            .ok()?
-            .ok()
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            self.get_data_with_priority(url, priority),
+        )
+        .await
+        .ok()?
+        .ok()
     }
 
     pub async fn video_tags(&self, bvid: &str) -> Result<Vec<String>, ProviderError> {
         let mut url = self.api_url("/x/tag/archive/tags");
         url.query_pairs_mut().append_pair("bvid", bvid);
-        let rows: Vec<serde_json::Value> = self.get_data_with_priority(url, RequestPriority::Background).await?;
-        Ok(rows.into_iter().filter_map(|row| row["tag_name"].as_str().map(str::to_owned)).collect())
+        let rows: Vec<serde_json::Value> = self
+            .get_data_with_priority(url, RequestPriority::Background)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| row["tag_name"].as_str().map(str::to_owned))
+            .collect())
     }
 
     pub async fn video_parts(&self, bvid: &str) -> Result<VideoParts, ProviderError> {
-        self.video_parts_with_priority(bvid, RequestPriority::Foreground).await
+        self.video_parts_with_priority(bvid, RequestPriority::Foreground)
+            .await
     }
 
-    pub async fn video_parts_with_priority(&self, bvid: &str, priority: RequestPriority) -> Result<VideoParts, ProviderError> {
+    pub async fn video_parts_with_priority(
+        &self,
+        bvid: &str,
+        priority: RequestPriority,
+    ) -> Result<VideoParts, ProviderError> {
         self.video_parts_request(bvid, priority, false).await
     }
 
-    pub async fn video_parts_request(&self, bvid: &str, priority: RequestPriority, refresh: bool) -> Result<VideoParts, ProviderError> {
+    pub async fn video_parts_request(
+        &self,
+        bvid: &str,
+        priority: RequestPriority,
+        refresh: bool,
+    ) -> Result<VideoParts, ProviderError> {
         let epoch = self.catalog_epoch.load(Ordering::Relaxed);
         let key = (epoch, bvid.to_owned());
         let entry = {
             let mut details = self.details.write().await;
-            if details.get(&key).and_then(|entry| entry.get())
+            if details
+                .get(&key)
+                .and_then(|entry| entry.get())
                 .is_some_and(|(at, _)| refresh || at.elapsed() >= DETAIL_TTL)
             {
                 details.remove(&key);
             }
             if details.len() >= DETAIL_CACHE_LIMIT && !details.contains_key(&key) {
-                let oldest = details.iter()
+                let oldest = details
+                    .iter()
                     .filter_map(|(key, entry)| entry.get().map(|(at, _)| (key, *at)))
                     .min_by_key(|(_, at)| *at)
                     .map(|(key, _)| key.clone());
@@ -1378,12 +1111,14 @@ impl BilibiliProvider {
             }
             details.entry(key.clone()).or_default().clone()
         };
-        let result = entry.get_or_try_init(|| async {
-            let _slot = self.foreground_catalog_slot(priority).await;
-            self.check_request_epoch(epoch)?;
-            let detail = self.load_video_parts(bvid, epoch, priority).await?;
-            Ok((Instant::now(), detail))
-        }).await;
+        let result = entry
+            .get_or_try_init(|| async {
+                let _slot = self.foreground_catalog_slot(priority).await;
+                self.check_request_epoch(epoch)?;
+                let detail = self.load_video_parts(bvid, epoch, priority).await?;
+                Ok((Instant::now(), detail))
+            })
+            .await;
         match result {
             Ok((_, detail)) => {
                 self.check_request_epoch(epoch)?;
@@ -1391,7 +1126,9 @@ impl BilibiliProvider {
             }
             Err(error) => {
                 let mut details = self.details.write().await;
-                if details.get(&key).is_some_and(|saved| Arc::ptr_eq(saved, &entry))
+                if details
+                    .get(&key)
+                    .is_some_and(|saved| Arc::ptr_eq(saved, &entry))
                     && Arc::strong_count(&entry) == 2
                 {
                     details.remove(&key);
@@ -1401,15 +1138,28 @@ impl BilibiliProvider {
         }
     }
 
-    async fn foreground_catalog_slot(&self, priority: RequestPriority) -> Option<tokio::sync::SemaphorePermit<'_>> {
+    async fn foreground_catalog_slot(
+        &self,
+        priority: RequestPriority,
+    ) -> Option<tokio::sync::SemaphorePermit<'_>> {
         if priority == RequestPriority::Foreground {
-            Some(self.page_slots.acquire().await.expect("page semaphore remains open"))
+            Some(
+                self.page_slots
+                    .acquire()
+                    .await
+                    .expect("page semaphore remains open"),
+            )
         } else {
             None
         }
     }
 
-    async fn load_video_parts(&self, bvid: &str, epoch: u64, priority: RequestPriority) -> Result<VideoParts, ProviderError> {
+    async fn load_video_parts(
+        &self,
+        bvid: &str,
+        epoch: u64,
+        priority: RequestPriority,
+    ) -> Result<VideoParts, ProviderError> {
         let detail = self.video_detail_with_priority(bvid, priority).await?;
         let charge = self.charge_info_with_priority(&detail, priority).await;
         let fallback_cover = normalize_url(&detail.pic);
@@ -1469,13 +1219,25 @@ impl BilibiliProvider {
         cid: i64,
         audio_id: u32,
     ) -> Result<(PlaybackSource, Option<PlaybackSource>), ProviderError> {
-        self.playback_startup_sources_with_priority(bvid, cid, audio_id, RequestPriority::Foreground).await
+        self.playback_startup_sources_with_priority(
+            bvid,
+            cid,
+            audio_id,
+            RequestPriority::Foreground,
+        )
+        .await
     }
 
     pub async fn playback_startup_sources_with_priority(
-        &self, bvid: &str, cid: i64, audio_id: u32, priority: RequestPriority,
+        &self,
+        bvid: &str,
+        cid: i64,
+        audio_id: u32,
+        priority: RequestPriority,
     ) -> Result<(PlaybackSource, Option<PlaybackSource>), ProviderError> {
-        let dash = self.play_dash_with_priority(bvid, cid, false, priority).await?;
+        let dash = self
+            .play_dash_with_priority(bvid, cid, false, priority)
+            .await?;
         let target = select_audio(&dash, audio_id).ok_or(ProviderError::NoAudio)?;
         let initial = startup_audio(&dash, target)
             .cloned()
@@ -1581,7 +1343,9 @@ impl BilibiliProvider {
     }
 
     pub async fn warm_playback(&self, bvid: &str, cid: i64) -> Result<(), ProviderError> {
-        self.play_dash_with_priority(bvid, cid, false, RequestPriority::Background).await.map(|_| ())
+        self.play_dash_with_priority(bvid, cid, false, RequestPriority::Background)
+            .await
+            .map(|_| ())
     }
 
     async fn play_dash(
@@ -1590,11 +1354,16 @@ impl BilibiliProvider {
         cid: i64,
         expanded: bool,
     ) -> Result<Arc<DashData>, ProviderError> {
-        self.play_dash_with_priority(bvid, cid, expanded, RequestPriority::Foreground).await
+        self.play_dash_with_priority(bvid, cid, expanded, RequestPriority::Foreground)
+            .await
     }
 
     async fn play_dash_with_priority(
-        &self, bvid: &str, cid: i64, expanded: bool, priority: RequestPriority,
+        &self,
+        bvid: &str,
+        cid: i64,
+        expanded: bool,
+        priority: RequestPriority,
     ) -> Result<Arc<DashData>, ProviderError> {
         let entry = {
             let mut cache = self.dash_cache.write().await;
@@ -1657,10 +1426,18 @@ impl BilibiliProvider {
                     ..
                 },
             ) => {
-                return Err(self.restricted_playback(bvid, false, priority).await.unwrap_or(error));
+                return Err(self
+                    .restricted_playback(bvid, false, priority)
+                    .await
+                    .unwrap_or(error));
             }
             Err(error @ ProviderError::Api { code: -404, .. }) => {
-                return match tokio::time::timeout(Duration::from_secs(3), self.video_detail_with_priority(bvid, priority)).await {
+                return match tokio::time::timeout(
+                    Duration::from_secs(3),
+                    self.video_detail_with_priority(bvid, priority),
+                )
+                .await
+                {
                     Ok(Err(expired @ ProviderError::Api { code: 62002, .. })) => Err(expired),
                     _ => Err(error),
                 };
@@ -1678,9 +1455,17 @@ impl BilibiliProvider {
         play.into_dash(bvid, cid)
     }
 
-    async fn restricted_playback(&self, bvid: &str, preview: bool, priority: RequestPriority) -> Option<ProviderError> {
-        if let Ok(Ok(detail)) =
-            tokio::time::timeout(Duration::from_secs(3), self.video_detail_with_priority(bvid, priority)).await
+    async fn restricted_playback(
+        &self,
+        bvid: &str,
+        preview: bool,
+        priority: RequestPriority,
+    ) -> Option<ProviderError> {
+        if let Ok(Ok(detail)) = tokio::time::timeout(
+            Duration::from_secs(3),
+            self.video_detail_with_priority(bvid, priority),
+        )
+        .await
         {
             if detail.access.blocked_kind(None).is_some() {
                 let charge = self.charge_info_with_priority(&detail, priority).await;
@@ -1795,19 +1580,31 @@ impl BilibiliProvider {
             .user_agent("Mozilla/5.0 Resonance/0.1")
             .build()?;
         let (epoch, session) = self.request_session().await;
-        let lease = self.requests.acquire(requests::Stage::Comments,
-            session_uid(session.as_deref()), RequestPriority::Foreground, true).await?;
+        let lease = self
+            .requests
+            .acquire(
+                requests::Stage::Comments,
+                session_uid(session.as_deref()),
+                RequestPriority::Foreground,
+                true,
+            )
+            .await?;
         self.check_request_epoch(epoch)?;
         let response = client
             .get(format!("{API_ORIGIN}/x/v1/dm/list.so?oid={cid}"))
             .header(reqwest::header::ACCEPT_ENCODING, "identity")
             .send()
-            .await.map_err(safe_network_error)?;
+            .await
+            .map_err(safe_network_error)?;
         if let Some(error) = lease.http_restriction(response.status(), response.headers()) {
             return Err(error);
         }
-        let bytes = response.error_for_status().map_err(safe_network_error)?
-            .bytes().await.map_err(safe_network_error)?;
+        let bytes = response
+            .error_for_status()
+            .map_err(safe_network_error)?
+            .bytes()
+            .await
+            .map_err(safe_network_error)?;
         let body = if bytes.starts_with(b"<") {
             String::from_utf8_lossy(&bytes).into_owned()
         } else {
@@ -1829,12 +1626,27 @@ impl BilibiliProvider {
         Url::parse(&format!("{API_ORIGIN}{path}")).expect("static API URL")
     }
 
+    pub(super) async fn hot_search(
+        &self,
+        limit: usize,
+    ) -> Result<serde_json::Value, ProviderError> {
+        let mut url = self.api_url("/x/web-interface/search/square");
+        url.query_pairs_mut()
+            .append_pair("limit", &limit.to_string())
+            .append_pair("platform", "web");
+        self.get_data_with_priority(url, RequestPriority::Background)
+            .await
+    }
+
     async fn get_data<T: DeserializeOwned>(&self, url: Url) -> Result<T, ProviderError> {
-        self.get_data_with_priority(url, RequestPriority::Foreground).await
+        self.get_data_with_priority(url, RequestPriority::Foreground)
+            .await
     }
 
     async fn get_data_with_priority<T: DeserializeOwned>(
-        &self, url: Url, priority: RequestPriority,
+        &self,
+        url: Url,
+        priority: RequestPriority,
     ) -> Result<T, ProviderError> {
         let stage = requests::Stage::for_url(&url);
         self.get_data_for(url, stage, priority, None).await
@@ -1847,43 +1659,70 @@ impl BilibiliProvider {
         priority: RequestPriority,
         web_url: Option<Url>,
     ) -> Result<T, ProviderError> {
-        self.read_json(url, stage, priority, web_url, |lease, status, headers, value| {
-            envelope_data(lease, status, headers, value, false)
-        }).await
+        self.read_json(
+            url,
+            stage,
+            priority,
+            web_url,
+            |lease, status, headers, value| envelope_data(lease, status, headers, value, false),
+        )
+        .await
     }
 
     async fn read_json<T>(
-        &self, url: Url, stage: requests::Stage, priority: RequestPriority, web_url: Option<Url>,
-        parse: impl FnOnce(&requests::Lease<'_>, reqwest::StatusCode, &HeaderMap, serde_json::Value) -> Result<T, ProviderError>,
+        &self,
+        url: Url,
+        stage: requests::Stage,
+        priority: RequestPriority,
+        web_url: Option<Url>,
+        parse: impl FnOnce(
+            &requests::Lease<'_>,
+            reqwest::StatusCode,
+            &HeaderMap,
+            serde_json::Value,
+        ) -> Result<T, ProviderError>,
     ) -> Result<T, ProviderError> {
         let (epoch, session) = self.request_session().await;
-        let lease = self.requests.acquire(stage, session_uid(session.as_deref()), priority, true).await?;
+        let lease = self
+            .requests
+            .acquire(stage, session_uid(session.as_deref()), priority, true)
+            .await?;
         let result = async {
             self.check_request_epoch(epoch)?;
             if let Some(web_url) = web_url {
-                self.ensure_search_session(web_url, session.as_deref(), &lease).await?;
+                self.ensure_search_session(web_url, session.as_deref(), &lease)
+                    .await?;
             }
             self.check_request_epoch(epoch)?;
             lease.validate()?;
-            let request = self.authenticated_get_with(&self.client, url.clone(), session.as_deref());
+            let request =
+                self.authenticated_get_with(&self.client, url.clone(), session.as_deref());
             let response = match request.send().await {
-                Err(error) if !lease.is_probe() && (error.is_connect() || (error.is_request() && !error.is_timeout())) => {
+                Err(error)
+                    if !lease.is_probe()
+                        && (error.is_connect() || (error.is_request() && !error.is_timeout())) =>
+                {
                     // Resume a dead pooled connection only before an HTTP response.
                     tokio::time::sleep(Duration::from_millis(500)).await;
                     self.check_request_epoch(epoch)?;
                     lease.validate()?;
-                    let fresh = Self::build_client(self.cookies.clone()).map_err(safe_network_error)?;
-                    self.authenticated_get_with(&fresh, url, session.as_deref()).send().await
+                    let fresh =
+                        Self::build_client(self.cookies.clone()).map_err(safe_network_error)?;
+                    self.authenticated_get_with(&fresh, url, session.as_deref())
+                        .send()
+                        .await
                 }
                 response => response,
-            }.map_err(safe_network_error)?;
+            }
+            .map_err(safe_network_error)?;
             let (status, headers, json) = response_json(response, &lease, false).await?;
             let data = parse(&lease, status, &headers, json)?;
             let _session = self.session_cookie.read().await;
             self.check_request_epoch(epoch)?;
             lease.succeeded();
             Ok(data)
-        }.await;
+        }
+        .await;
         if result.as_ref().is_err_and(ProviderError::retryable_read) {
             let _session = self.session_cookie.read().await;
             self.check_request_epoch(epoch)?;
@@ -1894,8 +1733,13 @@ impl BilibiliProvider {
         result
     }
 
-    async fn favorite_data<T: DeserializeOwned>(&self, url: Url, priority: RequestPriority) -> Result<T, ProviderError> {
-        self.get_data_for(url, requests::Stage::Favorites, priority, None).await
+    async fn favorite_data<T: DeserializeOwned>(
+        &self,
+        url: Url,
+        priority: RequestPriority,
+    ) -> Result<T, ProviderError> {
+        self.get_data_for(url, requests::Stage::Favorites, priority, None)
+            .await
     }
 
     async fn request_session(&self) -> (u64, Option<String>) {
@@ -1910,7 +1754,12 @@ impl BilibiliProvider {
         Ok(())
     }
 
-    fn authenticated_get_with(&self, client: &Client, url: Url, session: Option<&str>) -> reqwest::RequestBuilder {
+    fn authenticated_get_with(
+        &self,
+        client: &Client,
+        url: Url,
+        session: Option<&str>,
+    ) -> reqwest::RequestBuilder {
         let request = client.get(url.clone());
         match session {
             Some(session) => {
@@ -1964,10 +1813,19 @@ impl BilibiliProvider {
         let (epoch, session) = self.request_session().await;
         let cookie = session.ok_or(ProviderError::NotAuthenticated)?;
         let stage = requests::Stage::for_url(&url);
-        let lease = self.requests.acquire(stage, session_uid(Some(&cookie)), RequestPriority::Foreground, false).await?;
+        let lease = self
+            .requests
+            .acquire(
+                stage,
+                session_uid(Some(&cookie)),
+                RequestPriority::Foreground,
+                false,
+            )
+            .await?;
         self.check_request_epoch(epoch)?;
         lease.validate()?;
-        let response = self.client
+        let response = self
+            .client
             .post(url)
             .header(COOKIE, cookie)
             .form(form)
@@ -1986,23 +1844,35 @@ fn safe_network_error(error: reqwest::Error) -> ProviderError {
 }
 
 fn session_uid(cookie: Option<&str>) -> u64 {
-    cookie.into_iter().flat_map(|cookie| cookie.split(';'))
+    cookie
+        .into_iter()
+        .flat_map(|cookie| cookie.split(';'))
         .find_map(|pair| pair.trim().strip_prefix("DedeUserID=")?.parse().ok())
         .unwrap_or(0)
 }
 
 fn inspect_code(
-    lease: &requests::Lease<'_>, status: reqwest::StatusCode, headers: &HeaderMap, code: i64,
-    data: Option<&serde_json::Value>, message: String,
+    lease: &requests::Lease<'_>,
+    status: reqwest::StatusCode,
+    headers: &HeaderMap,
+    code: i64,
+    data: Option<&serde_json::Value>,
+    message: String,
 ) -> Result<(), ProviderError> {
-    if data.and_then(|data| data.get("v_voucher"))
+    if data
+        .and_then(|data| data.get("v_voucher"))
         .and_then(serde_json::Value::as_str)
         .is_some_and(|voucher| !voucher.is_empty())
     {
         return Err(lease.restrict(true, Some(status.as_u16()), Some(code), None));
     }
     if requests::is_rate_code(lease.stage(), code) {
-        return Err(lease.restrict(false, Some(status.as_u16()), Some(code), requests::delay_from_header(headers, std::time::SystemTime::now())));
+        return Err(lease.restrict(
+            false,
+            Some(status.as_u16()),
+            Some(code),
+            requests::delay_from_header(headers, std::time::SystemTime::now()),
+        ));
     }
     if code != 0 {
         return Err(ProviderError::Api { code, message });
@@ -2011,7 +1881,9 @@ fn inspect_code(
 }
 
 async fn response_json(
-    response: reqwest::Response, lease: &requests::Lease<'_>, write: bool,
+    response: reqwest::Response,
+    lease: &requests::Lease<'_>,
+    write: bool,
 ) -> Result<(reqwest::StatusCode, HeaderMap, serde_json::Value), ProviderError> {
     let status = response.status();
     let headers = response.headers().clone();
@@ -2021,8 +1893,12 @@ async fn response_json(
     if write && (status.is_server_error() || status == reqwest::StatusCode::REQUEST_TIMEOUT) {
         return Err(ProviderError::WriteUnconfirmed);
     }
-    let json = response.error_for_status().map_err(safe_network_error)?
-        .json().await.map_err(|error| {
+    let json = response
+        .error_for_status()
+        .map_err(safe_network_error)?
+        .json()
+        .await
+        .map_err(|error| {
             if write {
                 ProviderError::WriteUnconfirmed
             } else if error.is_timeout() || error.is_connect() {
@@ -2035,109 +1911,33 @@ async fn response_json(
 }
 
 fn envelope_data<T: DeserializeOwned>(
-    lease: &requests::Lease<'_>, status: reqwest::StatusCode, headers: &HeaderMap,
-    value: serde_json::Value, write: bool,
+    lease: &requests::Lease<'_>,
+    status: reqwest::StatusCode,
+    headers: &HeaderMap,
+    value: serde_json::Value,
+    write: bool,
 ) -> Result<T, ProviderError> {
-    let invalid = || if write { ProviderError::WriteUnconfirmed } else { ProviderError::UnexpectedResponse };
-    let envelope: Envelope<serde_json::Value> = serde_json::from_value(value).map_err(|_| invalid())?;
-    inspect_code(lease, status, headers, envelope.code, envelope.data.as_ref(), envelope.message)?;
+    let invalid = || {
+        if write {
+            ProviderError::WriteUnconfirmed
+        } else {
+            ProviderError::UnexpectedResponse
+        }
+    };
+    let envelope: Envelope<serde_json::Value> =
+        serde_json::from_value(value).map_err(|_| invalid())?;
+    inspect_code(
+        lease,
+        status,
+        headers,
+        envelope.code,
+        envelope.data.as_ref(),
+        envelope.message,
+    )?;
     match envelope.data {
         Some(data) => serde_json::from_value(data).map_err(|_| invalid()),
         None if write => serde_json::from_value(serde_json::Value::Null).map_err(|_| invalid()),
         None => Err(ProviderError::UnexpectedResponse),
-    }
-}
-
-fn comment_from_raw(raw: RawReply) -> CommentItem {
-    let id = raw.rpid;
-    let root_id = if raw.root == 0 { id } else { raw.root };
-    CommentItem {
-        id,
-        root_id,
-        id_text: id.to_string(),
-        root_id_text: root_id.to_string(),
-        parent_id: raw.parent,
-        user_id: raw.member.mid.parse().unwrap_or(0),
-        user_name: raw.member.uname,
-        avatar_url: normalize_url(&raw.member.avatar),
-        message: raw.content.message,
-        emotes: raw
-            .content
-            .emote
-            .unwrap_or_default()
-            .into_iter()
-            .take(64)
-            .filter_map(|(token, emote)| {
-                let url = Url::parse(&normalize_url(&emote.url)).ok()?;
-                let host = url.host_str()?;
-                (url.scheme() == "https"
-                    && url.username().is_empty()
-                    && url.password().is_none()
-                    && ["hdslb.com", "biliimg.com"].iter().any(|domain| {
-                        host == *domain
-                            || host
-                                .strip_suffix(*domain)
-                                .is_some_and(|prefix| prefix.ends_with('.'))
-                    }))
-                .then(|| (token, url.to_string()))
-            })
-            .collect(),
-        created_at: raw.ctime,
-        like_count: raw.like_count,
-        liked: raw.action == 1,
-        reply_count: raw.rcount,
-        replies: raw
-            .replies
-            .unwrap_or_default()
-            .into_iter()
-            .map(comment_from_raw)
-            .collect(),
-    }
-}
-
-fn comment_page_from_data(data: ReplyData, requested: i64) -> CommentPage {
-    let page_size = data.page.size.max(20);
-    let page = data.page.num.max(requested);
-    // The pinned list is separate from replies. Some responses repeat its first
-    // item in upper.top, which also supplies the pin on its own on older responses.
-    let first_page = page == 1;
-    let pinned = if first_page { data.top_replies.unwrap_or_default() } else { Vec::new() };
-    let upper_top = if first_page { data.upper.and_then(|upper| upper.top) } else { None };
-    let mut seen = HashSet::new();
-    let items = pinned
-        .into_iter()
-        .chain(upper_top)
-        .chain(data.replies.unwrap_or_default())
-        .filter(|reply| seen.insert(reply.rpid))
-        .map(comment_from_raw)
-        .collect();
-    CommentPage {
-        items,
-        next: page.saturating_add(1),
-        is_end: page.saturating_mul(page_size) >= data.page.count,
-        total: data.page.count.max(data.page.acount),
-    }
-}
-
-fn comment_reply_page_from_data(data: ReplyData, requested: i64) -> CommentPage {
-    let items: Vec<_> = data
-        .replies
-        .unwrap_or_default()
-        .into_iter()
-        .map(comment_from_raw)
-        .collect();
-    let page = data.page.num.max(requested);
-    let total = data.page.count.max(0);
-    let is_end = if data.page.size > 0 && (total > 0 || items.is_empty()) {
-        total <= page.saturating_mul(data.page.size)
-    } else {
-        items.len() < 20
-    };
-    CommentPage {
-        items,
-        next: page.saturating_add(1),
-        is_end,
-        total,
     }
 }
 
@@ -2257,181 +2057,8 @@ fn suggestion_words(value: &serde_json::Value) -> Vec<String> {
     words
 }
 
-fn account_profile_from_nav(data: NavData) -> AccountProfile {
-    let vip_status = data
-        .vip_status
-        .or_else(|| data.vip.as_ref().and_then(|vip| vip.status));
-    let vip_active = vip_status
-        .filter(|_| data.is_login)
-        .map(|status| status == 1);
-    let active = vip_active == Some(true);
-    let vip_type = data
-        .vip_type
-        .or_else(|| data.vip.as_ref().and_then(|vip| vip.kind))
-        .filter(|_| data.is_login && active);
-    let label_source = data
-        .vip_label
-        .as_ref()
-        .or_else(|| data.vip.as_ref().and_then(|vip| vip.label.as_ref()));
-    let vip_theme = if data.is_login && active {
-        label_source
-            .and_then(|label| label.label_theme.as_deref())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-    } else {
-        None
-    };
-    let vip_label = if data.is_login && active {
-        label_source
-            .and_then(|label| label.text.as_deref())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-    } else {
-        None
-    };
-    AccountProfile {
-        logged_in: data.is_login,
-        user_id: data.is_login.then_some(data.mid),
-        name: data.is_login.then_some(data.uname),
-        avatar_url: data.is_login.then_some(normalize_url(&data.face)),
-        level: data
-            .level
-            .filter(|_| data.is_login)
-            .and_then(|level| level.current_level),
-        senior_member: data
-            .is_senior_member
-            .filter(|_| data.is_login)
-            .map(|value| value == 1),
-        vip_active,
-        vip_type,
-        vip_theme,
-        vip_label,
-    }
-}
-
-#[cfg(test)]
-mod nav_profile_tests {
-    use super::{NavData, account_profile_from_nav};
-
-    #[test]
-    fn parses_vip_tiers_and_senior_member_from_nav() {
-        let ten_year: NavData = serde_json::from_str(
-            r#"{
-                    "isLogin": true,
-                    "mid": 42,
-                    "uname": "音乐旅人",
-                    "face": "http://i0.hdslb.com/a.jpg",
-                    "level_info": { "current_level": 6 },
-                    "is_senior_member": 1,
-                    "vipStatus": 1,
-                    "vipType": 2,
-                    "vip_label": { "text": "十年大会员", "label_theme": "ten_annual_vip" }
-                }"#,
-        )
-        .expect("ten year nav");
-        let profile = account_profile_from_nav(ten_year);
-        assert_eq!(profile.level, Some(6));
-        assert_eq!(profile.senior_member, Some(true));
-        assert_eq!(profile.vip_active, Some(true));
-        assert_eq!(profile.vip_type, Some(2));
-        assert_eq!(profile.vip_theme.as_deref(), Some("ten_annual_vip"));
-        assert_eq!(profile.vip_label.as_deref(), Some("十年大会员"));
-
-        let expired: NavData = serde_json::from_str(
-            r#"{
-                    "isLogin": true,
-                    "mid": 43,
-                    "uname": "旧会员",
-                    "face": "https://i0.hdslb.com/b.jpg",
-                    "level_info": { "current_level": 5 },
-                    "vipStatus": 0,
-                    "vipType": 2,
-                    "vip_label": { "text": "年度大会员", "label_theme": "annual_vip" }
-                }"#,
-        )
-        .expect("expired nav");
-        let expired_profile = account_profile_from_nav(expired);
-        assert_eq!(expired_profile.vip_active, Some(false));
-        assert_eq!(expired_profile.vip_type, None);
-        assert_eq!(expired_profile.vip_theme, None);
-        assert_eq!(expired_profile.vip_label, None);
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn comment_page_includes_pinned_replies_once_and_keeps_server_pagination() {
-        use super::{ReplyData, comment_page_from_data};
-        use serde_json::{from_value, json};
-
-        let pinned = json!({"rpid": 306410445761_i64, "member": {}, "rcount": 2,
-                            "content": {"message": "1.可爱女人00:01  2.半岛铁盒01:03"}});
-        let ordinary = json!({"rpid": 272545741232_i64, "member": {}, "content": {}});
-        let data = json!({
-            "page": {"num": 1, "size": 20, "count": 274, "acount": 274},
-            "upper": {"top": pinned},
-            "top_replies": [pinned],
-            "replies": [ordinary, pinned]
-        });
-        let first = comment_page_from_data(from_value::<ReplyData>(data.clone()).unwrap(), 1);
-        assert_eq!(first.items.len(), 2);
-        assert_eq!(first.items[0].id_text, "306410445761");
-        assert_eq!(first.items[0].root_id_text, "306410445761");
-        assert_eq!(first.items[0].reply_count, 2);
-        assert_eq!(first.items[1].id_text, "272545741232");
-        assert_eq!(first.next, 2);
-        assert!(!first.is_end);
-        assert_eq!(first.total, 274);
-
-        let mut later = data;
-        later["replies"] = json!([ordinary]);
-        let second = comment_page_from_data(from_value::<ReplyData>(later).unwrap(), 2);
-        assert_eq!(second.items.len(), 1);
-        assert_eq!(second.items[0].id_text, "272545741232");
-        assert_eq!(second.next, 3);
-    }
-
-    #[test]
-    fn comment_page_uses_upper_pin_when_the_pinned_list_is_missing() {
-        use super::{ReplyData, comment_page_from_data};
-        use serde_json::{from_value, json};
-
-        let data: ReplyData = from_value(json!({
-            "page": {"num": 1, "size": 20, "count": 1},
-            "upper": {"top": {"rpid": 31, "member": {}, "content": {"message": "置顶"}}},
-            "top_replies": null,
-            "replies": null
-        })).unwrap();
-        let first = comment_page_from_data(data, 1);
-        assert_eq!(first.items.len(), 1);
-        assert_eq!(first.items[0].id, 31);
-        assert!(first.is_end);
-    }
-
-    #[test]
-    fn comment_reply_pages_keep_exact_ids_and_follow_metadata_after_short_pages() {
-        use super::{ReplyData, comment_reply_page_from_data};
-        use serde_json::{from_value, json};
-
-        let payload: ReplyData = from_value(json!({
-            "page": {"num": 1, "size": 20, "count": 41},
-            "replies": [{"rpid": 90071992547409921_i64, "root": 90071992547409920_i64,
-                         "member": {}, "content": {"message": "0:59 续篇"}}]
-        })).unwrap();
-        let first = comment_reply_page_from_data(payload, 1);
-        assert!(!first.is_end);
-        assert_eq!(first.next, 2);
-        assert_eq!(first.items[0].id_text, "90071992547409921");
-        assert_eq!(first.items[0].root_id_text, "90071992547409920");
-
-        let payload: ReplyData = from_value(json!({"page": {"num": 3, "size": 20, "count": 41}, "replies": []})).unwrap();
-        assert!(comment_reply_page_from_data(payload, 3).is_end);
-        assert!(comment_reply_page_from_data(ReplyData::default(), 1).is_end);
-    }
-
     #[test]
     fn subscribed_seasons_filter_mixed_pages_without_stopping_pagination() {
         use super::CollectedFoldersData;
@@ -2725,7 +2352,8 @@ mod tests {
         let empty = serde_json::from_value::<super::FavoritePage>(serde_json::json!({
             "medias": null,
             "has_more": false
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(empty.medias.is_none() && !empty.has_more);
     }
 
@@ -2771,13 +2399,14 @@ mod tests {
 
     #[tokio::test]
     async fn search_initializes_visitor_cookie_and_does_not_retry_412() {
-        use super::{Arc, BilibiliProvider, COOKIE, HeaderMap, SET_COOKIE, Url};
+        use super::{Arc, BilibiliProvider, COOKIE, HeaderMap, Url};
         use axum::{
             Router,
             body::Body,
             http::{Response, StatusCode},
             routing::get,
         };
+        use reqwest::header::SET_COOKIE;
         use std::sync::atomic::{AtomicUsize, Ordering};
         for failures in [0usize, 1] {
             let homes = Arc::new(AtomicUsize::new(0));
@@ -2827,7 +2456,10 @@ mod tests {
                 assert_eq!(searches.load(Ordering::SeqCst), 2);
             } else {
                 assert!(matches!(result, Err(super::ProviderError::RateLimited(_))));
-                assert!(matches!(provider.search_response(search, web).await, Err(super::ProviderError::RateLimited(_))));
+                assert!(matches!(
+                    provider.search_response(search, web).await,
+                    Err(super::ProviderError::RateLimited(_))
+                ));
                 assert_eq!(searches.load(Ordering::SeqCst), 1);
             }
             assert_eq!(homes.load(Ordering::SeqCst), 1);
@@ -2838,16 +2470,25 @@ mod tests {
     #[tokio::test]
     async fn verification_envelope_is_checked_before_typed_result_and_scoped_to_account() {
         use axum::{Json, Router, routing::get};
-        let router = Router::new().route("/probe", get(|| async {
-            Json(serde_json::json!({"code": 0, "data": {"v_voucher": "do-not-disclose"}}))
-        }));
+        let router = Router::new().route(
+            "/probe",
+            get(|| async {
+                Json(serde_json::json!({"code": 0, "data": {"v_voucher": "do-not-disclose"}}))
+            }),
+        );
         let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/probe", socket.local_addr().unwrap()).parse::<super::Url>().unwrap();
+        let url = format!("http://{}/probe", socket.local_addr().unwrap())
+            .parse::<super::Url>()
+            .unwrap();
         let server = tokio::spawn(async move { axum::serve(socket, router).await.unwrap() });
         let mut provider = super::BilibiliProvider::new().unwrap();
         provider.requests = super::Arc::new(super::requests::Policy::new(None));
-        provider.set_session_cookie(Some("DedeUserID=42".into())).await;
-        let result = provider.get_data_with_priority::<Vec<String>>(url, super::RequestPriority::Foreground).await;
+        provider
+            .set_session_cookie(Some("DedeUserID=42".into()))
+            .await;
+        let result = provider
+            .get_data_with_priority::<Vec<String>>(url, super::RequestPriority::Foreground)
+            .await;
         let error = crate::interface::error::CommandError::bilibili(result.unwrap_err());
         let serialized = serde_json::to_value(error).unwrap();
         assert_eq!(serialized["code"], "bili_verification_required");
@@ -2855,10 +2496,29 @@ mod tests {
         assert_eq!(serialized["httpStatus"], 200);
         assert!(!serialized.to_string().contains("do-not-disclose"));
         assert!(matches!(
-            provider.requests.acquire(super::requests::Stage::Catalog, 42, super::RequestPriority::Background, true).await,
+            provider
+                .requests
+                .acquire(
+                    super::requests::Stage::Catalog,
+                    42,
+                    super::RequestPriority::Background,
+                    true
+                )
+                .await,
             Err(super::ProviderError::VerificationRequired(_))
         ));
-        assert!(provider.requests.acquire(super::requests::Stage::Catalog, 43, super::RequestPriority::Background, true).await.is_ok());
+        assert!(
+            provider
+                .requests
+                .acquire(
+                    super::requests::Stage::Catalog,
+                    43,
+                    super::RequestPriority::Background,
+                    true
+                )
+                .await
+                .is_ok()
+        );
         server.abort();
     }
 

@@ -41,7 +41,8 @@ pub(super) fn scope_key(c: &rusqlite::Connection, cfg: &super::Config) -> Result
 fn context(db: &Database, state: &SyncState) -> Result<(String, String, String), String> {
     let c = db.0.lock().map_err(|_| "数据库正忙")?;
     let scope = context_key(db, &c)?;
-    let session = crate::infrastructure::database::account_session(&c).map_err(|e| e.to_string())?;
+    let session =
+        crate::infrastructure::database::account_session(&c).map_err(|e| e.to_string())?;
     let saved: Option<String> = c
         .query_row(
             "SELECT json FROM sync_scheduler WHERE target=?1",
@@ -207,8 +208,8 @@ pub fn sync_diagnostics(database: State<'_, Database>) -> Result<Vec<Diagnostic>
 }
 
 #[tauri::command]
-pub async fn sync_background(
-    app: AppHandle,
+pub async fn sync_background<R: tauri::Runtime>(
+    app: AppHandle<R>,
     database: State<'_, Database>,
     state: State<'_, SyncState>,
     hint: Hint,
@@ -219,8 +220,8 @@ pub async fn sync_background(
     let job = Box::pin(background_inner(app, database, state, hint, bulk_import));
     super::v2_net::discovery_round(job).await
 }
-async fn background_inner(
-    app: AppHandle,
+async fn background_inner<R: tauri::Runtime>(
+    app: AppHandle<R>,
     database: State<'_, Database>,
     state: State<'_, SyncState>,
     hint: Hint,
@@ -279,23 +280,28 @@ mod tests {
         let sizes = [
             (
                 "background",
-                future_size(|(app, db, state)| {
+                future_size(|(app, db, state): (AppHandle<tauri::Wry>, _, _)| {
                     sync_background(app, db, state, Hint::Foreground, None)
                 }),
             ),
             (
                 "library",
-                future_size(|(app, db, state)| {
+                future_size(|(app, db, state): (AppHandle<tauri::Wry>, _, _)| {
                     super::super::sync_now(app, db, state, None, None, None)
                 }),
             ),
             (
                 "statistics",
-                future_size(|(app, db, state)| statistics::listening_sync(app, db, state, None)),
+                future_size(|(app, db, state): (AppHandle<tauri::Wry>, _, _)| {
+                    statistics::listening_sync(app, db, state, None)
+                }),
             ),
         ];
         for (command, size) in sizes {
-            assert!(size <= 4096, "{command} sync retains {size} bytes in the IPC future");
+            assert!(
+                size <= 4096,
+                "{command} sync retains {size} bytes in the IPC future"
+            );
         }
     }
 

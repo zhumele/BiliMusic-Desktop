@@ -30,16 +30,16 @@ pub fn target_key(
     Ok(format!("target-v1-{:x}", md5::compute(identity)))
 }
 
-/// Claim the old baseline once, while its original settings/credentials are still available.
-pub fn bind_legacy(c: &Connection, provider: &str, target: &str) -> Result<(), String> {
+/// Claim the original BiliMusic Cloud baseline once, before replacing its credentials.
+pub(super) fn bind_cloud_baseline(c: &Connection, target: &str) -> Result<(), String> {
     init(c)?;
     let tx = c.unchecked_transaction().map_err(|e| e.to_string())?;
     c.execute(
-        "INSERT OR IGNORE INTO sync_legacy_binding(provider,target) VALUES(?1,?2)",
-        params![provider, target],
+        "INSERT OR IGNORE INTO sync_legacy_binding(provider,target) VALUES('cloud',?1)",
+        [target],
     )
     .map_err(|e| e.to_string())?;
-    c.execute("INSERT OR IGNORE INTO sync_target_base(target,json) SELECT ?2,b.json FROM sync_base b JOIN sync_legacy_binding l ON l.provider=b.provider WHERE b.provider=?1 AND l.target=?2",params![provider,target]).map_err(|e|e.to_string())?;
+    c.execute("INSERT OR IGNORE INTO sync_target_base(target,json) SELECT ?1,b.json FROM sync_base b JOIN sync_legacy_binding l ON l.provider=b.provider WHERE b.provider='cloud' AND l.target=?1",[target]).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e| e.to_string())
 }
 pub fn export(c: &Connection, uid: &str, history: bool) -> Result<Snapshot, String> {
@@ -94,13 +94,15 @@ pub fn export(c: &Connection, uid: &str, history: bool) -> Result<Snapshot, Stri
             );
         }
         if history {
-            let mut q = c.prepare("SELECT p.reference,p.bvid,p.cid,p.position_ms,p.observed_at
+            let mut q = c.prepare(
+                "SELECT p.reference,p.bvid,p.cid,p.position_ms,p.observed_at
                  FROM collection_progress p
                  LEFT JOIN collections own ON own.bvid=p.reference
                  LEFT JOIN collections creator ON creator.bvid=p.creator_ref
                  WHERE own.bvid IS NOT NULL OR creator.bvid IS NOT NULL
                  ORDER BY own.bvid IS NOT NULL DESC,p.observed_at DESC,p.reference
-                 LIMIT ?1")?;
+                 LIMIT ?1",
+            )?;
             for row in q.query_map([COLLECTION_PROGRESS_LIMIT], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -235,9 +237,14 @@ pub fn export(c: &Connection, uid: &str, history: bool) -> Result<Snapshot, Stri
             .optional()
             .map_err(|e| e.to_string())?;
         if let Some(overrides) = overrides {
-            for (field, value) in ["overrideTitle", "overrideArtist", "overrideAlbum", "overrideCover"]
-                .into_iter()
-                .zip(overrides)
+            for (field, value) in [
+                "overrideTitle",
+                "overrideArtist",
+                "overrideAlbum",
+                "overrideCover",
+            ]
+            .into_iter()
+            .zip(overrides)
             {
                 r.fields.insert(field.into(), json!(value));
             }
@@ -282,7 +289,10 @@ pub fn apply_with_inferred_tracks(
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for id in ids {
             let key = format!("track:{id}");
-            if !keep.contains(id.as_str()) && s.records.contains_key(&key) && !inferred.contains(&key) {
+            if !keep.contains(id.as_str())
+                && s.records.contains_key(&key)
+                && !inferred.contains(&key)
+            {
                 tx.execute("INSERT OR REPLACE INTO sync_lyric_archive(track_id,provider,provider_lyric_id,raw_text,parsed_json,bias_ms,selected_manually,updated_at) SELECT track_id,provider,provider_lyric_id,raw_text,parsed_json,bias_ms,selected_manually,updated_at FROM lyrics WHERE track_id=?1",[&id])?;
                 tx.execute("DELETE FROM lyrics WHERE track_id=?1", [&id])?;
             }
@@ -522,19 +532,19 @@ mod tests {
     fn target_baselines_do_not_follow_provider_reconnections() {
         let c = Connection::open_in_memory().unwrap();
         init(&c).unwrap();
-        c.execute("INSERT INTO sync_base VALUES('webdav','old')", [])
+        c.execute("INSERT INTO sync_base VALUES('cloud','old')", [])
             .unwrap();
-        let a = target_key("webdav", "42", "https://dav.jianguoyun.com/dav/a/", "one").unwrap();
-        let same = target_key("webdav", "42", "https://dav.jianguoyun.com/dav/a", "one").unwrap();
-        let b = target_key("webdav", "42", "https://dav.jianguoyun.com/dav/b/", "one").unwrap();
+        let a = target_key("cloud", "42", "https://bilimusic.cn/a/", "one").unwrap();
+        let same = target_key("cloud", "42", "https://bilimusic.cn/a", "one").unwrap();
+        let b = target_key("cloud", "42", "https://bilimusic.cn/b/", "one").unwrap();
         assert_eq!(a, same);
         assert_ne!(a, b);
         assert_ne!(
             a,
-            target_key("webdav", "42", "https://dav.jianguoyun.com/dav/a/", "two").unwrap()
+            target_key("cloud", "42", "https://bilimusic.cn/a/", "two").unwrap()
         );
-        bind_legacy(&c, "webdav", &a).unwrap();
-        bind_legacy(&c, "webdav", &b).unwrap();
+        bind_cloud_baseline(&c, &a).unwrap();
+        bind_cloud_baseline(&c, &b).unwrap();
         assert_eq!(
             c.query_row(
                 "SELECT COUNT(*) FROM sync_target_base WHERE target=?1",
@@ -748,6 +758,143 @@ mod tests {
         );
     }
     #[test]
+    fn custom_playlist_order_reuses_item_positions_and_preserves_members_across_sync() {
+        use crate::infrastructure::repositories::playlists::PlaylistRepository;
+        let mut a = Connection::open_in_memory().unwrap();
+        let b = Connection::open_in_memory().unwrap();
+        for c in [&a, &b] {
+            crate::infrastructure::migrations::migrate(c).unwrap();
+        }
+        let playlist = "8076ad4b-2861-4be1-8b08-a6a0fb0b0579";
+        let order = |c: &Connection| {
+            PlaylistRepository::tracks(c, playlist)
+                .unwrap()
+                .into_iter()
+                .map(|t| t.id)
+                .collect::<Vec<_>>()
+        };
+        PlaylistRepository::create(&a, playlist, "Custom").unwrap();
+        let ids = (1..=4)
+            .map(|n| format!("bilibili:BV123:{n}"))
+            .collect::<Vec<_>>();
+        for (index, id) in ids.iter().enumerate() {
+            a.execute(
+                "INSERT INTO source_items(id,provider,bvid,cid) VALUES(?1,'bilibili','BV123',?2)",
+                params![id, index + 1],
+            )
+            .unwrap();
+            a.execute(
+                "INSERT INTO tracks(id,source_item_id,title) VALUES(?1,?1,'Track')",
+                [id],
+            )
+            .unwrap();
+        }
+        PlaylistRepository::add_tracks(&a, playlist, &ids, true).unwrap();
+        let baseline = export(&a, "42", false).unwrap();
+        apply(&b, &baseline, false).unwrap();
+        let mut reordered = ids.clone();
+        reordered.swap(0, 1);
+        assert!(
+            PlaylistRepository::reorder(
+                &mut a,
+                std::path::Path::new("."),
+                playlist,
+                &ids,
+                &reordered
+            )
+            .unwrap()
+        );
+        assert!(
+            !PlaylistRepository::reorder(
+                &mut a,
+                std::path::Path::new("."),
+                playlist,
+                &ids,
+                &reordered
+            )
+            .unwrap()
+        );
+        assert_eq!(order(&a), reordered);
+        PlaylistRepository::remove_track(&b, playlist, &ids[3]).unwrap();
+        let (synced, conflicts) = merge(
+            &baseline,
+            &export(&a, "42", false).unwrap(),
+            &export(&b, "42", false).unwrap(),
+            None,
+        );
+        assert!(conflicts.is_empty());
+        for c in [&a, &b] {
+            apply(c, &synced, false).unwrap();
+            assert_eq!(order(c), reordered[..3]);
+        }
+
+        // Two edits can leave two rows with the same numeric position. Every
+        // device must project the same order regardless of when it added them.
+        let item = format!("item:{playlist}|{}", ids[2]);
+        let mut tied = synced;
+        let pos = tied.records[&format!("item:{playlist}|{}", ids[0])].fields["position"].clone();
+        tied.records
+            .get_mut(&item)
+            .unwrap()
+            .fields
+            .insert("position".into(), pos);
+        apply(&a, &tied, false).unwrap();
+        apply(&b, &tied, false).unwrap();
+        assert_eq!(order(&a), order(&b));
+    }
+
+    #[test]
+    fn copied_bilibili_playlist_order_round_trips_as_existing_item_positions() {
+        use crate::infrastructure::repositories::playlists::PlaylistRepository;
+
+        let mut source = Connection::open_in_memory().unwrap();
+        let target = Connection::open_in_memory().unwrap();
+        for connection in [&source, &target] {
+            crate::infrastructure::migrations::migrate(connection).unwrap();
+        }
+        let playlist = "import:8076ad4b-2861-4be1-8b08-a6a0fb0b0579";
+        PlaylistRepository::create(&source, playlist, "B 站收藏夹副本").unwrap();
+        let ids = (1..=2)
+            .map(|cid| format!("bilibili:BV1GJ411x7h7:{cid}"))
+            .collect::<Vec<_>>();
+        for (index, id) in ids.iter().enumerate() {
+            source.execute("INSERT INTO source_items(id,provider,bvid,cid) VALUES(?1,'bilibili','BV1GJ411x7h7',?2)", params![id, index + 1]).unwrap();
+            source
+                .execute(
+                    "INSERT INTO tracks(id,source_item_id,title) VALUES(?1,?1,'歌名')",
+                    [id],
+                )
+                .unwrap();
+        }
+        PlaylistRepository::add_tracks(&source, playlist, &ids, true).unwrap();
+        let reordered = ids.iter().rev().cloned().collect::<Vec<_>>();
+        assert!(
+            PlaylistRepository::reorder(
+                &mut source,
+                std::path::Path::new("."),
+                playlist,
+                &ids,
+                &reordered
+            )
+            .unwrap()
+        );
+        assert!(
+            crate::sync::playlist_order::positions(&source, playlist)
+                .unwrap()
+                .is_none()
+        );
+        apply(&target, &export(&source, "42", false).unwrap(), false).unwrap();
+        assert_eq!(
+            PlaylistRepository::tracks(&target, playlist)
+                .unwrap()
+                .into_iter()
+                .map(|track| track.id)
+                .collect::<Vec<_>>(),
+            reordered
+        );
+    }
+
+    #[test]
     fn imported_playlists_and_members_round_trip_without_changing_identity() {
         let c = Connection::open_in_memory().unwrap();
         crate::infrastructure::migrations::migrate(&c).unwrap();
@@ -922,23 +1069,6 @@ mod tests {
         let (merged, conflicts) = merge(&snapshot, &restarted, &snapshot, None);
         assert!(conflicts.is_empty());
         assert_eq!(text(&merged.records[&history], "resume"), "300:0");
-
-        let mut left = crate::sync::dav::Doc::empty("42");
-        left.update("first", &snapshot).unwrap();
-        let mut right = left.clone();
-        let mut seeked = snapshot.clone();
-        seeked
-            .records
-            .get_mut(&history)
-            .unwrap()
-            .fields
-            .insert("resume".into(), json!("250:123000"));
-        left.update("first", &seeked).unwrap();
-        right.update("second", &restarted).unwrap();
-        left.join(right).unwrap();
-        let (dav, conflicts) = left.materialize().unwrap();
-        assert!(conflicts.is_empty());
-        assert_eq!(text(&dav.records[&history], "resume"), "300:0");
 
         apply(&local, &merged, true).unwrap();
         assert_eq!(

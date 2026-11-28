@@ -6,20 +6,21 @@
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
+use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::{Path as AxPath, State as AxState};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::Router;
-use serde_json::{json, Value};
-use tauri::ipc::{CallbackFn, InvokeBody, InvokeResponseBody};
+use serde_json::{Value, json};
 use tauri::Manager;
+use tauri::ipc::{CallbackFn, InvokeBody, InvokeResponseBody};
 
 use crate::infrastructure::database::Database;
 use crate::infrastructure::diagnostics::Diagnostics;
 use crate::infrastructure::media_proxy::MediaProxy;
 use crate::infrastructure::providers::bilibili::BilibiliProvider;
+use crate::infrastructure::providers::hot_search::HotSearchProvider;
 use crate::infrastructure::providers::lrclib::LrclibProvider;
 use crate::infrastructure::providers::music_catalog::MusicCatalogProvider;
 use crate::infrastructure::repositories::auth::AuthRepository;
@@ -66,11 +67,11 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("启动媒体代理失败: {e}"))?;
     eprintln!("[server] creating bilibili provider");
     let bilibili = BilibiliProvider::new().map_err(|e| format!("初始化 B 站客户端失败: {e}"))?;
-    let saved_cookie = database
-        .0
-        .lock()
-        .ok()
-        .and_then(|connection| AuthRepository::get_cookie(&connection, "bilibili").ok().flatten());
+    let saved_cookie = database.0.lock().ok().and_then(|connection| {
+        AuthRepository::get_cookie(&connection, "bilibili")
+            .ok()
+            .flatten()
+    });
     bilibili.set_session_cookie(saved_cookie).await;
 
     eprintln!("[server] building mock tauri app");
@@ -84,6 +85,14 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     app.manage(bilibili);
     app.manage(LrclibProvider::new().map_err(|e| format!("初始化歌词源失败: {e}"))?);
     app.manage(MusicCatalogProvider::new().map_err(|e| format!("初始化音乐库失败: {e}"))?);
+    // 0.4.6 新增：热搜缓存与网易云推荐源（含每日推荐登录态）。
+    app.manage(
+        HotSearchProvider::new(Some(data_dir.join("music-hot-search-v1")))
+            .map_err(|e| format!("初始化热搜缓存失败: {e}"))?,
+    );
+    app.manage(crate::interface::recommendation::RecommendationState::new(
+        app.handle(),
+    ));
     app.manage(crate::sync::SyncState::default());
 
     eprintln!("[server] creating mock webview window");
@@ -153,11 +162,11 @@ fn web_dir() -> PathBuf {
 }
 
 async fn shutdown_signal() {
-    let mut terminate = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-    {
-        Ok(signal) => signal,
-        Err(_) => return std::future::pending::<()>().await,
-    };
+    let mut terminate =
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(signal) => signal,
+            Err(_) => return std::future::pending::<()>().await,
+        };
     tokio::select! {
         _ = terminate.recv() => {}
         _ = tokio::signal::ctrl_c() => {}
@@ -166,8 +175,8 @@ async fn shutdown_signal() {
 }
 
 async fn health(AxState(state): AxState<Arc<ServerState>>) -> Response {
-    let value = dispatch(&state, "app_health", json!({}))
-        .unwrap_or_else(|_| json!({ "status": "ok" }));
+    let value =
+        dispatch(&state, "app_health", json!({})).unwrap_or_else(|_| json!({ "status": "ok" }));
     json_response(StatusCode::OK, &value)
 }
 
@@ -215,9 +224,9 @@ async fn invoke(
 }
 
 fn dispatch(state: &ServerState, command: &str, args: Value) -> Result<Value, Value> {
-    let webview = state.app.get_webview_window("main").ok_or_else(|| {
-        json!({ "code": "NO_WEBVIEW", "message": "webview 尚未初始化", "retryable": true })
-    })?;
+    let webview = state.app.get_webview_window("main").ok_or_else(
+        || json!({ "code": "NO_WEBVIEW", "message": "webview 尚未初始化", "retryable": true }),
+    )?;
     let body = if args.is_object() {
         InvokeBody::Json(args)
     } else {
@@ -235,7 +244,9 @@ fn dispatch(state: &ServerState, command: &str, args: Value) -> Result<Value, Va
         invoke_key: tauri::test::INVOKE_KEY.to_string(),
     };
     match tauri::test::get_ipc_response(&webview, request) {
-        Ok(InvokeResponseBody::Json(text)) => Ok(serde_json::from_str(&text).unwrap_or(Value::Null)),
+        Ok(InvokeResponseBody::Json(text)) => {
+            Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
+        }
         Ok(InvokeResponseBody::Raw(bytes)) => {
             use base64::Engine;
             Ok(Value::String(

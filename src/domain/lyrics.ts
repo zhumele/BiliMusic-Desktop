@@ -3,3 +3,12 @@ export type LyricLine = { words?: LyricWord[]; endTimeMs?: number; timeMs: numbe
 export type LyricCandidate = { provider: 'lrclib' | 'netease' | 'qq' | 'local'; id: number; trackName: string; artistName: string; albumName: string; artworkUrl?: string; duration: number; instrumental: boolean; plainLyrics?: string; syncedLyrics?: string; translatedLyrics?: string; romanizedLyrics?: string }
 export type LyricSearchResult = { candidates: LyricCandidate[]; warning?: string }
 export type StoredLyrics = { trackId: string; provider: string; providerLyricId: string; rawText: string; parsedJson: string; biasMs: number; selectedManually: boolean; writeToken?: string; accountSession?: string }
+
+export const lyricsWereCleared = (lyrics?: StoredLyrics | null) =>
+  lyrics?.provider === 'local' && lyrics.providerLyricId === 'cleared'
+
+export class LyricBiasConflict extends Error {
+  constructor(readonly lyrics: StoredLyrics | null) {
+    super('歌词已更新，请重新调整偏移')
+  }
+}

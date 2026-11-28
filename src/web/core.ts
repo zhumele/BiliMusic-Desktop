@@ -77,10 +77,23 @@ const unsupported: Record<string, unknown> = {
   sync_archive_invalid_track_references: null,
   listening_sync: null,
   listening_sync_configure: null,
+  // 浏览器/fnOS 没有第二个 WebView：网易云只能走扫码登录，网页登录与
+  // Android 专属的下载目录在 web 模式下直接兜底。
+  netease_web_login_cancel: null,
+  android_download_destination: null,
   ios_player_start: null,
   ios_player_stop: null,
   android_player_start: null,
   android_player_stop: null,
+}
+
+/**
+ * 浏览器/fnOS 模式下会被拒绝的命令：照抄 Rust 端非桌面平台的返回值，
+ * 让界面显示同样的提示，而不是静默成功。
+ */
+const rejected: Record<string, string> = {
+  // 上游 iOS/OHOS 分支：没有第二个 WebView，只能扫码。
+  netease_web_login: '当前平台请使用扫码登录',
 }
 
 export function isTauri(): boolean {
@@ -94,6 +107,14 @@ export function convertFileSrc(path: string): string {
 export const TAURI_BUNDLE_TYPE = 'web'
 
 export async function invoke<T>(command: string, args?: InvokeArgs): Promise<T> {
+  // 浏览器里没有系统 opener：直接开新标签页，等价于桌面端点「前往 B 站」。
+  if (command === 'bili_open_verification_page') {
+    window.open('https://www.bilibili.com/', '_blank', 'noopener,noreferrer')
+    return undefined as T
+  }
+  if (Object.prototype.hasOwnProperty.call(rejected, command)) {
+    throw { code: 'UNSUPPORTED_WEB', message: rejected[command], retryable: false }
+  }
   if (Object.prototype.hasOwnProperty.call(unsupported, command)) {
     return unsupported[command] as T
   }

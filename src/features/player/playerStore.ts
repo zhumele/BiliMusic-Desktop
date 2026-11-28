@@ -1,5 +1,5 @@
 import { audioDiagnosticEngine, startDiagnosticTrace, type DiagnosticDetails } from '../../services/diagnostics'
-import { listVisibilityOrigins, entryAllowed, orderedQueueTarget, visibleCheckpoint, packQueueBase,unpackQueueBase,type VisibilityOrigin } from '../../domain/contentVisibility'
+import { listVisibilityOrigins, entryAllowed, orderedQueueTarget, visibleCheckpoint, unpackQueueBase,type VisibilityOrigin } from '../../domain/contentVisibility'
 import { ensureVisibility, useContentVisibility } from '../../services/contentVisibility'
 import { ShuffleDeck, type ShuffleState } from '../../domain/shuffle'
 import { indexOfflineTracks, isOfflineVideoRow, offlineEntries, useOfflinePlayback, waitForOfflineLibrary } from './offlinePlayback'
@@ -11,18 +11,19 @@ import { syncOHOSQueue } from './ohosAudio'
 import { createOperationScope } from './operationScope'
 import { alignAudioSource, prepareAudioSource } from './sourceSwitch'
 import { accountEpoch, advanceAccountEpoch } from '../../services/accountScope'
-import { isMobile, isNativeMobile, isIOS, isAndroid, isOHOS } from '../../services/platform'
+import { isNativeMobile, isIOS, isAndroid, isOHOS } from '../../services/platform'
 import { observeMobileAudio, setMobileCollection, prepareMobileAudio, playMobileAudio, controlMobileAudio, snapshotMobileAudio, mobilePlaybackClock } from './mobileAudio'
 import { syncAndroidQueue } from './androidAudio'
 import { iosListenerAge, playIOSAudio, restartIOSAudioObservation, syncIOSQueue, type IOSAudioState } from './iosAudio'
 import { create } from 'zustand'
-import { createJSONStorage, persist } from 'zustand/middleware'
+import { persist } from 'zustand/middleware'
 import type { Track } from '../../domain/track'
 import { getTrackPlaybackPlan, inDesktopShell, recordPlayedTrack } from '../../services/desktopApi'
 import { videoDetailFromTrack } from '../../services/mediaSources'
 import { getVideoPages } from '../../services/videoPages'
 import { getVideoParts } from '../../services/desktopApi'
 import { toTrack } from '../../services/collectionTrack'
+import { createPlayerSnapshotStorage } from './playerSnapshot'
 import { playbackPositionScope, readPlaybackPosition, usablePlaybackPosition, writePlaybackPosition } from './playbackPosition'
 import { automaticResumePolicy, automaticResumePosition, isCollectionPlayback, normalizeResumeThreshold, type ResumeThreshold } from './resumePolicy'
 import { preparePlaybackStart } from './playbackStart'
@@ -36,7 +37,7 @@ import { createDesktopSleepTimer, noSleep, type SleepState } from './desktopSlee
 export type PlaybackStatus = 'idle' | 'resolving' | 'buffering' | 'playing' | 'paused' | 'error'
 export const playbackRates = [0.75, 1, 1.25, 1.5, 1.75, 2] as const
 export type RepeatMode = 'off' | 'all' | 'one'
-export type QueueSource = { origin?: 'linked-favorite'; offlineOnly?: boolean; visibilityManaged?: boolean; entryOrder?:string[]; entryOrigins?: Record<string, VisibilityOrigin[]>; creatorKeyword?: string; creatorMid?: number; creatorPage?: number; creatorTotal?: number; kind: 'video' | 'season'; title: string; collectionRef?: string }
+export type QueueSource = { origin?: 'linked-favorite'; offlineOnly?: boolean; visibilityManaged?: boolean; entryOrder?:string[]; entryOrigins?: Record<string, VisibilityOrigin[]>; creatorKeyword?: string; creatorMid?: number; creatorPage?: number; creatorTotal?: number; kind: 'video' | 'season' | 'recommendation'; title: string; collectionRef?: string }
 type PlayerState = { queueBase?: Track[]; queueOrigins?: Record<string,VisibilityOrigin[]>; shuffleState?: ShuffleState; queueSource?: QueueSource; queueFeedback?: { serial: number; title?: string }; sleep: SleepState; current: Track | null; queue: Track[]; status: PlaybackStatus; error: PlaybackIssue | null; queueOpen: boolean; queueReversed: boolean; reverseQueue: () => void; progressSeconds: number; durationSeconds: number; volume: number; rate: number; resumeThresholdSeconds: ResumeThreshold; setResumeThreshold: (threshold: ResumeThreshold) => void; setRate: (rate: number) => Promise<void>; shuffled: boolean; repeatMode: RepeatMode; play: (track: Track, startAt?: number, refreshing?: boolean, checkpointAt?: number, originPlayback?: boolean, expired?: ReadonlySet<string>) => Promise<void>; playAll: (tracks: Track[]) => Promise<void>; playFromList: (tracks: Track[], trackId: string, source?: QueueSource, startAt?: number, resumeCheckpoint?: boolean) => Promise<void>; enqueue: (tracks: Track[]) => void; removeFromQueue: (id: string) => void; removeQueueRows: (ids: string[]) => void; moveQueueRows: (ids: string[], direction: -1 | 1, byVideo: boolean) => void; reorderQueueRows: (sourceIds: string[], targetIds: string[], position: 'before' | 'after', scope: QueueReorderScope) => void; clearQueue: () => void; moveInQueue: (id: string, direction: -1 | 1) => void; toggle: () => Promise<void>; toggleQueue: () => void; next: (fromEnded?: boolean) => Promise<void>; previous: () => Promise<void>; seek: (seconds: number) => void; setVolume: (volume: number) => void; toggleShuffle: () => void; cycleRepeat: () => void; cyclePlaybackMode: () => void; updateTrack: (track: Track) => void }
 
 let shuffleDeck = new ShuffleDeck()
@@ -148,10 +149,10 @@ export async function resolveSeasonEntry(entry: Track) {
   return video.parts.map(part => toTrack(video, part))
 }
 
-export async function prepareSeasonQueueEntry(entry: Track) {
+export async function prepareSeasonQueueEntry(entry: Track, current: () => boolean = () => true) {
   const intent = playbackIntent()
   const parts = await resolveSeasonEntry(entry)
-  if (parts.length && intent === playbackIntent()) {
+  if (parts.length && intent === playbackIntent() && current()) {
     const state=usePlayerStore.getState(),origins=state.queueOrigins?.[entry.id]??['']
     usePlayerStore.setState({queueBase:replaceSeasonEntry(state.queueBase??state.queue,entry.id,parts),queueOrigins:{...state.queueOrigins,...Object.fromEntries(parts.map(part=>[part.id,origins]))}})
     reprojectVisibility()
@@ -166,6 +167,16 @@ export function seasonPlaybackQueue(tracks: Track[], selected: Track, parts: Tra
   if (tracks.some(track => track.id === selected.id)) return tracks
   const end = tracks.findIndex((track, at) => at > index && track.source.bvid !== selected.source.bvid)
   return [...tracks.slice(0, index), ...parts, ...(end < 0 ? [] : tracks.slice(end))]
+}
+
+export function updatePlaybackFavorites(changes: ReadonlyMap<string, boolean>) {
+  usePlayerStore.setState(({ current, queue, queueBase }) => {
+    const update = (track: Track) => {
+      const liked = changes.get(track.id)
+      return liked !== undefined && liked !== track.liked ? { ...track, liked } : track
+    }
+    return { current: current && update(current), queue: queue.map(update), queueBase: queueBase?.map(update) }
+  })
 }
 
 export function adoptSeasonQueue(intent: number, selectedId: string, tracks: Track[], title: string, collectionRef?: string, visibilityManaged?: boolean) {
@@ -184,12 +195,16 @@ export function adoptSeasonQueue(intent: number, selectedId: string, tracks: Tra
 }
 
 async function resumeAndroidPlayback(track: Track, valid: () => boolean, position: number | undefined) {
+  const trace = diagnosticTrace(track, usePlayerStore.getState().queueSource)
+  trace.emit('control', 'started', { code: 'resume_ui' })
   usePlayerStore.setState({ status: 'buffering', error: null })
   try {
     await controlMobileAudio('resume')
+    if (valid()) trace.emit('control', 'succeeded', { code: 'resume_delivered' })
   } catch (error) {
     if (!valid() || usePlayerStore.getState().status === 'playing') return
     const issue = playbackIssue('audio-control', error, '恢复播放失败')
+    trace.emit('control', 'failed', { code: issue.code })
     if (issue.code === 'native_not_ready') {
       loadedTrackId = null
       await usePlayerStore.getState().play(track, position, false, undefined, true)
@@ -235,7 +250,7 @@ export function resetPlayerForAccount() {
   recoveryAttempted = false
   if (!isNativeMobile) desktopSleep.cancel()
   if (audio) { audio.pause(); audio.removeAttribute('src'); audio.load() }
-  usePlayerStore.setState({ shuffleState:undefined, sleep: noSleep, current: null, queue: [],queueBase:[],queueOrigins:{}, queueSource: undefined, queueFeedback: undefined, queueOpen: false, queueReversed: false, status: 'paused', progressSeconds: 0, durationSeconds: 0, rate: 1, error: null })
+  usePlayerStore.setState({ shuffleState:undefined, sleep: noSleep, current: null, queue: [],queueBase:[],queueOrigins:{}, queueSource: undefined, queueFeedback: undefined, queueOpen: false, queueReversed: false, status: 'paused', progressSeconds: 0, durationSeconds: 0, error: null })
   flushPlayerSnapshot()
   accountReset = (async () => {
     // Stop native playback immediately, even if saving the old position fails.
@@ -247,19 +262,13 @@ export function resetPlayerForAccount() {
   return accountReset
 }
 export function playbackClock() { if (isNativeMobile) return mobilePlaybackClock(); return audio && loadedTrackId === usePlayerStore.getState().current?.id ? audio.currentTime : usePlayerStore.getState().progressSeconds }
-let persistTimer: ReturnType<typeof setTimeout> | undefined
-let pendingSnapshot: { key: string; value: string } | undefined
-let snapshotQueue: Track[] | undefined
-let snapshotCurrent: string | undefined
-let urgentSnapshot = false
-function flushPlayerSnapshot() {
-  if (pendingSnapshot) { try { localStorage.setItem(pendingSnapshot.key, pendingSnapshot.value) } catch { /* Playback remains usable when storage is full. */ } pendingSnapshot = undefined }
-}
-const playerStorage = {
-  getItem: (key: string) => localStorage.getItem(key),
-  setItem: (key: string, value: string) => { pendingSnapshot = { key, value }; if (urgentSnapshot) { urgentSnapshot = false; flushPlayerSnapshot(); return }; if (!persistTimer) persistTimer = setTimeout(() => { persistTimer = undefined; flushPlayerSnapshot() }, 1000) },
-  removeItem: (key: string) => localStorage.removeItem(key),
-}
+
+type PlayerSnapshotDraft = Pick<PlayerState,
+  'queueBase' | 'queueOrigins' | 'shuffleState' | 'current' | 'queue' | 'queueSource' | 'queueReversed' |
+  'progressSeconds' | 'durationSeconds' | 'volume' | 'rate' | 'shuffled' | 'repeatMode' | 'resumeThresholdSeconds'
+> & { offlineQueue?: boolean }
+
+const { storage: playerStorage, flush: flushPlayerSnapshot } = createPlayerSnapshotStorage<PlayerSnapshotDraft>()
 window.addEventListener('pagehide', () => { flushPosition(); flushPlayerSnapshot() })
 window.addEventListener('blur', () => { flushPosition(); flushPlayerSnapshot() })
 if (typeof document !== 'undefined') document.addEventListener('visibilitychange', () => { if (document.hidden) { flushPosition(); flushPlayerSnapshot() } })
@@ -307,7 +316,7 @@ function playerAudio() {
 }
 
 export const usePlayerStore = create<PlayerState>()(persist((set, get) => ({
-  sleep: noSleep, current: inDesktopShell ? null : demoTracks[1], queue: inDesktopShell ? [] : demoTracks, status: 'paused', error: null, queueOpen: false, queueReversed: false, progressSeconds: 0, durationSeconds: inDesktopShell ? 0 : demoTracks[1].durationSeconds, volume: isMobile ? 1 : .7, rate: 1, resumeThresholdSeconds: 0, setResumeThreshold: value => set({ resumeThresholdSeconds: normalizeResumeThreshold(value) }), shuffled: false, repeatMode: 'off',
+  sleep: noSleep, current: inDesktopShell ? null : demoTracks[1], queue: inDesktopShell ? [] : demoTracks, status: 'paused', error: null, queueOpen: false, queueReversed: false, progressSeconds: 0, durationSeconds: inDesktopShell ? 0 : demoTracks[1].durationSeconds, volume: isNativeMobile ? 1 : .7, rate: 1, resumeThresholdSeconds: 0, setResumeThreshold: value => set({ resumeThresholdSeconds: normalizeResumeThreshold(value) }), shuffled: false, repeatMode: 'off',
   play: async (track, startAt, refreshing = false, checkpointAt, originPlayback = false, expired) => {
     track = withTrackTitle(track)
     if (accountResetting) return
@@ -395,13 +404,13 @@ export const usePlayerStore = create<PlayerState>()(persist((set, get) => ({
       const updatedBase = base.map(item => item.id === storedTrack.id && !(offline && isOfflineVideoRow(item)) ? storedTrack : item)
       const queueBase = uniqueTracks(representedByVideo ? updatedBase : [...updatedBase, storedTrack])
       set({ current: storedTrack, queue, queueBase, durationSeconds: storedTrack.durationSeconds, progressSeconds: desktopSeekRevision !== seekRevision ? get().progressSeconds : 0 })
-      const [plan] = await Promise.all([
+      const [plan, accountSession] = await Promise.all([
         getTrackPlaybackPlan(storedTrack, refreshing || previous.status === 'error', false, useOfflinePlayback.getState().offline),
         isNativeMobile ? ensureNativeReady().then(async () => {
-          if (!isNativeMobile || request !== playRequest) return
+          if (request !== playRequest) return undefined
           const state = get()
-          await syncNativeQueue(state.queue, state.repeatMode, state.shuffled, state.resumeThresholdSeconds, state.queueSource)
-        }) : Promise.resolve(),
+          return syncNativeQueue(state.queue, state.repeatMode, state.shuffled, state.resumeThresholdSeconds, state.queueSource)
+        }) : undefined,
       ])
       if (request !== playRequest) return
       if (!refreshing && !eligible(storedTrack)) { reprojectVisibility(); await get().next(); return }
@@ -416,7 +425,7 @@ export const usePlayerStore = create<PlayerState>()(persist((set, get) => ({
       if (isNativeMobile) {
         loadedTrackId = storedTrack.id
         initialPositionPending = position > 0
-        await playMobileAudio(storedTrack, plan.url, position, get().volume, true, loadedCollectionRef, get().rate, false, plan.upgradeUrl, resumePolicy, plan.loudnessGainDb, trace.operation)
+        await playMobileAudio(storedTrack, plan.url, position, get().volume, true, loadedCollectionRef, get().rate, false, plan.upgradeUrl, resumePolicy, plan.loudnessGainDb, trace.operation, accountSession)
         return
       }
       const element = playerAudio()
@@ -504,7 +513,7 @@ export const usePlayerStore = create<PlayerState>()(persist((set, get) => ({
       oldSource?.title !== queueSource?.title || oldQueue.length !== queue.length || oldQueue.some((track, index) => track.id !== queue[index].id)
     set({
       queue: current ? queue.map(item => item.id === current.id ? { ...item, ...current, resolveParts: item.resolveParts } : item) : queue,
-      queueReversed: false, queueSource, queueBase, queueOrigins,
+      queueReversed: false, queueSource: queueSource && { ...queueSource }, queueBase, queueOrigins,
       ...(keepPlaying && changed ? { queueFeedback: { serial: ++queueFeedbackSerial, title: queueSource?.title } } : {}),
     })
     if (!keepPlaying || resumeCheckpoint) await get().play(selected, resumeCheckpoint ? undefined : startAt, false, resumeCheckpoint ? startAt : undefined,true)
@@ -654,6 +663,8 @@ export const usePlayerStore = create<PlayerState>()(persist((set, get) => ({
       else if (audio) audio.playbackRate = rate
     } catch {
       if (valid()) set({ rate: previous, error: playbackIssue('audio-control', null, '当前无法调整播放速度，请重试') })
+    } finally {
+      if (valid()) flushPlayerSnapshot()
     }
   },
   toggleShuffle: () => set(({ shuffled }) => ({ shuffled: !shuffled, repeatMode: 'all' })),
@@ -664,11 +675,11 @@ export const usePlayerStore = create<PlayerState>()(persist((set, get) => ({
     return { queueBase:queueBase?.map(update), current:current ? update(current) : null, queue:queue.map(update) }
   }),
 }), {
-  name: 'resonance-player-v1', storage: createJSONStorage(() => playerStorage),
+  name: 'resonance-player-v1', storage: playerStorage,
   version: 2,
   migrate: (persisted, version) => {
     const saved = persisted as PlayerState
-    const oldDefault = isAndroid ? version < 1 : isMobile && version < 2
+    const oldDefault = isAndroid ? version < 1 : isNativeMobile && version < 2
     return oldDefault && saved.volume === .7 ? { ...saved, volume: 1 } : saved
   },
   merge: (persisted, initial) => {
@@ -681,6 +692,7 @@ export const usePlayerStore = create<PlayerState>()(persist((set, get) => ({
     const queueBase=Array.isArray(saved.queueBase)?saved.queueBase.filter(track=>!track.id.startsWith('local:')).map(normalize):unpackQueueBase(queue,queueOrder,hiddenQueueTracks?.map(normalize))
     return {
       ...initial, ...restored,
+      rate: playbackRates.find(option => option === saved.rate) ?? initial.rate,
       resumeThresholdSeconds: saved.resumeThresholdSeconds !== undefined ? normalizeResumeThreshold(saved.resumeThresholdSeconds) : legacyAutoResume === false ? null : initial.resumeThresholdSeconds,
       repeatMode: saved.shuffled ? 'all' : saved.repeatMode || initial.repeatMode,
       current: saved.current && !retiredCurrent ? normalize(saved.current) : initial.current,
@@ -689,13 +701,10 @@ export const usePlayerStore = create<PlayerState>()(persist((set, get) => ({
       ...(retiredCurrent ? { progressSeconds: 0, durationSeconds: 0 } : {}),
     }
   },
-  partialize: ({ queueBase,queueOrigins,shuffleState, current, queue, queueSource, queueReversed, progressSeconds, durationSeconds, volume, shuffled, repeatMode, resumeThresholdSeconds }) => {
-    urgentSnapshot = queue !== snapshotQueue || current?.id !== snapshotCurrent
-    snapshotQueue = queue; snapshotCurrent = current?.id
-    const base = queueBase ?? queue
-    const storedQueue = useOfflinePlayback.getState().offline ? queueForOfflineSnapshot(queue, base) : queue
-    return { ...packQueueBase(storedQueue,base),queueOrigins,shuffleState:isNativeMobile ? undefined : shuffleState, current, queue: storedQueue, queueSource, queueReversed, progressSeconds, durationSeconds, volume, shuffled, repeatMode, resumeThresholdSeconds }
-  },
+  partialize: ({ queueBase, queueOrigins, shuffleState, current, queue, queueSource, queueReversed, progressSeconds, durationSeconds, volume, rate, shuffled, repeatMode, resumeThresholdSeconds }) => ({
+    queueBase, queueOrigins, shuffleState: isNativeMobile ? undefined : shuffleState, current, queue, queueSource, queueReversed,
+    progressSeconds, durationSeconds, volume, rate, shuffled, repeatMode, resumeThresholdSeconds, offlineQueue: useOfflinePlayback.getState().offline,
+  }),
 }))
 
 const desktopSleep = createDesktopSleepTimer(
@@ -796,13 +805,20 @@ function onNativeState(state: Awaited<ReturnType<typeof snapshotMobileAudio>> & 
   if (!state.action) nativeLyricsScope = session && state.id ? { id: state.id, session } : undefined
   if (session && session !== nativeSession) { controlScope.invalidate(); nativeSession = session }
   if (state.floatingLyricsEnabled !== undefined) window.dispatchEvent(new CustomEvent('bilimusic-native-floating',{detail:state.floatingLyricsEnabled}))
-  if(state.floatingLyricsStyleRevision && state.floatingLyricsStyleRevision>floatingStyleRevision){floatingStyleRevision=state.floatingLyricsStyleRevision;window.dispatchEvent(new CustomEvent('bilimusic-floating-style',{detail:{fontSize:state.floatingLyricsFontSize,locked:state.floatingLyricsLocked}}))}
+  if (state.floatingLyricsStyleRevision && state.floatingLyricsStyleRevision > floatingStyleRevision) {
+    floatingStyleRevision = state.floatingLyricsStyleRevision
+    window.dispatchEvent(new CustomEvent('bilimusic-floating-style', { detail: {
+      fontSize: state.floatingLyricsFontSize,
+      locked: state.floatingLyricsLocked,
+      language: state.floatingLyricsLanguage,
+    } }))
+  }
   if (state.sleepDeadline !== undefined) {
     const sleep = usePlayerStore.getState().sleep
     const next = { deadline: state.sleepDeadline, duration: state.sleepDuration ?? 0, expired: Boolean(state.sleepExpired) }
     if (sleep.deadline !== next.deadline || sleep.duration !== next.duration || sleep.expired !== next.expired) usePlayerStore.setState({ sleep: next })
   }
-  if (isMobile && state.expandedEntries) {
+  if (isNativeMobile && state.expandedEntries) {
     const current = usePlayerStore.getState()
     let queueBase = current.queueBase ?? current.queue
     let queueOrigins = {...current.queueOrigins}
@@ -813,8 +829,8 @@ function onNativeState(state: Awaited<ReturnType<typeof snapshotMobileAudio>> & 
     }
     if (queueBase !== current.queueBase) {usePlayerStore.setState({queueBase,queueOrigins});reprojectVisibility()}
   }
-  if (isMobile && state.track?.resolveParts && state.track.source.cid <= 0 && state.status !== 'error') return
-  if (isMobile && state.track && state.id !== usePlayerStore.getState().current?.id) {
+  if (isNativeMobile && state.track?.resolveParts && state.track.source.cid <= 0 && state.status !== 'error') return
+  if (isNativeMobile && state.track && state.id !== usePlayerStore.getState().current?.id) {
     const current = usePlayerStore.getState()
     if (current.current && (current.status !== 'resolving' || loadedTrackId === current.current.id) && current.queue.some(track => track.id === state.id)) {
       ++queueIntent
@@ -876,29 +892,88 @@ function onNativeState(state: Awaited<ReturnType<typeof snapshotMobileAudio>> & 
     ...(state.duration ? { durationSeconds: state.duration } : {}), ...(error === undefined ? {} : { error }) })
 }
 let nativeReady: Promise<void> | undefined
-function ensureNativeReady() {
+function ensureNativeReady(rebind = false) {
   if (!isNativeMobile) return Promise.resolve()
-  return nativeReady ??= observeMobileAudio(onNativeState)
-    .then(async () => onNativeState(await snapshotMobileAudio()))
-    .catch(error => { nativeReady = undefined; throw error })
+  if (nativeReady && !rebind) return nativeReady
+  const epoch = accountEpoch()
+  const readiness = (rebind ? restartIOSAudioObservation() : observeMobileAudio(onNativeState))
+    .then(async () => {
+      const snapshot = await snapshotMobileAudio()
+      if (nativeReady === readiness && accountEpoch() === epoch) onNativeState(snapshot)
+    })
+    .catch(error => {
+      if (nativeReady === readiness) nativeReady = undefined
+      throw error
+    })
+  nativeReady = readiness
+  return readiness
 }
-void ensureNativeReady().then(() => applyLoudnessSetting()).catch(nativeError)
-let reconciliationPending = false
-let foregroundPending = false
+
+let failedObservationEpoch: number | undefined
+function reportNativeObservationFailure(epoch: number) {
+  if (epoch !== accountEpoch() || failedObservationEpoch === epoch) return
+  failedObservationEpoch = epoch
+  startDiagnosticTrace('playback', { engine: audioDiagnosticEngine() }).emit('control', 'failed', { code: 'native_observation_failed' })
+}
+
+if (isNativeMobile) {
+  const epoch = accountEpoch()
+  void ensureNativeReady().then(() => {
+    if (epoch !== accountEpoch()) return
+    return applyLoudnessSetting().catch(() => {
+      if (epoch === accountEpoch()) startDiagnosticTrace('playback', { engine: audioDiagnosticEngine() }).emit('control', 'failed', { code: 'native_loudness_unavailable' })
+    })
+  }, () => reportNativeObservationFailure(epoch))
+}
+
+async function refreshNativePlayback(epoch: number, rebind: boolean) {
+  const refreshesSnapshot = !nativeReady || rebind
+  await ensureNativeReady(rebind)
+  if (!refreshesSnapshot) {
+    const snapshot = await snapshotMobileAudio()
+    if (epoch === accountEpoch()) onNativeState(snapshot)
+  }
+  return epoch === accountEpoch() && !accountResetting
+}
+
+let reconciling = false
+let rebinding = false
+let rebindPending = false
+let foregroundPending: number | undefined
 async function reconcileMobilePlayback(rebind = false, foreground = false) {
-  foregroundPending ||= foreground
-  if (reconciliationPending) return
-  reconciliationPending = true
+  if (foreground) foregroundPending = accountEpoch()
+  if (rebind && !rebinding) rebindPending = true
+  if (reconciling) return
+  reconciling = true
   try {
-    if (isIOS && rebind) await restartIOSAudioObservation()
-    else await ensureNativeReady()
-    onNativeState(await snapshotMobileAudio())
-  } catch (error) {
-    if (isIOS && !rebind) {
-      try { await restartIOSAudioObservation(); onNativeState(await snapshotMobileAudio()); return } catch { /* report the original failure */ }
-    }
-    nativeError(error)
-  } finally { reconciliationPending = false; if (foregroundPending) { foregroundPending = false; window.dispatchEvent(new Event('bilimusic-playback-reconciled')) } }
+    let epoch: number
+    do {
+      epoch = accountEpoch()
+      rebinding = rebindPending
+      rebindPending = false
+      let applied = false
+      try {
+        applied = await refreshNativePlayback(epoch, rebinding).catch(error => {
+          if (!isIOS || rebinding || epoch !== accountEpoch()) throw error
+          rebinding = true
+          rebindPending = false
+          return refreshNativePlayback(epoch, true)
+        })
+      } catch {
+        reportNativeObservationFailure(epoch)
+      }
+      if (applied) {
+        failedObservationEpoch = undefined
+        if (foregroundPending === epoch && !rebindPending && !document.hidden) {
+          foregroundPending = undefined
+          window.dispatchEvent(new Event('bilimusic-playback-reconciled'))
+        }
+      }
+    } while (rebindPending || (foregroundPending === accountEpoch() && foregroundPending !== epoch))
+  } finally {
+    reconciling = false
+    rebinding = false
+  }
 }
 if (isNativeMobile) {
   const resume = () => { if (!document.hidden) void reconcileMobilePlayback(isIOS && iosListenerAge() > 2_000, true) }
@@ -939,6 +1014,29 @@ function visibleQueueParts(track: Track, origins: PlayerState['queueOrigins'], r
 function projectQueue(base: Track[], origins: PlayerState['queueOrigins'], rules: ReturnType<typeof useContentVisibility.getState>['rules']) {
   return uniqueTracks(base.flatMap(track => visibleQueueParts(track, origins, rules)))
 }
+
+export function appendCreatorQueuePage(expected: { source: QueueSource; page: number; epoch: number }, tracks: Track[], total: number) {
+  const state = usePlayerStore.getState()
+  const source = state.queueSource
+  if (accountResetting || accountEpoch() !== expected.epoch || source !== expected.source || (source.creatorPage ?? 1) !== expected.page) return false
+
+  const base = state.queueBase ?? state.queue
+  const known = new Set(base.map(track => track.source.bvid))
+  const added = tracks.filter(track => {
+    if (known.has(track.source.bvid)) return false
+    known.add(track.source.bvid)
+    return true
+  })
+  const queueBase = added.length ? [...base, ...added] : base
+  const queueOrigins = added.length ? { ...state.queueOrigins, ...Object.fromEntries(added.map(track => [track.id, listVisibilityOrigins(track, source)])) } : state.queueOrigins
+  const queue = added.length ? projectQueue(queueBase, queueOrigins, useContentVisibility.getState().rules) : state.queue
+  usePlayerStore.setState({
+    queueBase, queueOrigins, queue,
+    queueSource: { ...source, creatorPage: expected.page + 1, creatorTotal: tracks.length ? total : known.size },
+  })
+  return true
+}
+
 const syncNativeQueue: typeof nativeQueueWriter = (tracks,mode,shuffled,threshold,source) => {
   const state = usePlayerStore.getState()
   const base = state.queueBase ?? tracks
@@ -966,14 +1064,6 @@ function reorderVisibleBase(state: PlayerState, queue: Track[]) {
   }))
   const visibleSlots = ordered.values()
   return base.map(track => ordered.has(track) ? visibleSlots.next().value! : track)
-}
-function queueForOfflineSnapshot(queue: Track[], base: Track[]) {
-  const baseById = new Map(base.map(track => [track.id, track]))
-  return queue.flatMap(track => {
-    const original = baseById.get(track.id)
-    // A downloaded first part may have the same ID as its unresolved video.
-    return original ? [isOfflineVideoRow(original) ? original : track] : []
-  })
 }
 function reprojectVisibility(offlineChanged = false) {
   const state = usePlayerStore.getState(), rules = useContentVisibility.getState().rules

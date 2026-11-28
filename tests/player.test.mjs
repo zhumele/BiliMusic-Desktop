@@ -52,6 +52,82 @@ function setup(snapshot) {
 const track = id => ({ id, source: { provider: 'bilibili', bvid: 'BVTEST00001', cid: Number(id), page: 1 }, title: id, durationSeconds: 120, liked: false })
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done }); return { promise, resolve } }
 
+test('progress updates coalesce full queue serialization before storage, with immediate queue and exit flushes', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const { store, listeners, storage } = setup()
+  const queue = Array.from({ length: 1500 }, (_, index) => track(String(index + 1)))
+  store.getState().enqueue(queue)
+  const key = 'resonance-player-v1'
+  const stringify = JSON.stringify
+  const serialized = []
+  t.mock.method(JSON, 'stringify', (value, ...args) => {
+    if (value?.version === 2 && value?.state?.queueOrder?.length === queue.length) serialized.push(value.state)
+    return stringify(value, ...args)
+  })
+
+  for (let tick = 1; tick <= 4; tick++) store.setState({ progressSeconds: tick / 4 })
+  assert.equal(serialized.length, 0)
+  t.mock.timers.tick(1000)
+  assert.equal(serialized.length, 1)
+  assert.equal(JSON.parse(storage.get(key)).state.progressSeconds, 1)
+
+  store.setState({ progressSeconds: 1.25 })
+  listeners.pagehide()
+  assert.equal(serialized.length, 2)
+  assert.equal(JSON.parse(storage.get(key)).state.progressSeconds, 1.25)
+  store.setState({ progressSeconds: 1.5 })
+  store.getState().reverseQueue()
+  assert.equal(serialized.length, 3)
+  const saved = JSON.parse(storage.get(key)).state
+  assert.equal(saved.progressSeconds, 1.5)
+  assert.equal(saved.queueOrder[0], '1500')
+  assert.equal('queueBase' in saved, false)
+  assert.equal('offlineQueue' in saved, false)
+})
+
+test('a pending progress write cannot restore a cleared player snapshot', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const { store, storage, listeners } = setup()
+  store.getState().enqueue([track('1')])
+  store.setState({ progressSeconds: 8 })
+  store.persist.clearStorage()
+  t.mock.timers.tick(1000)
+  listeners.pagehide()
+  assert.equal(storage.has('resonance-player-v1'), false)
+})
+
+test('creator pages preserve raw and hidden queue entries across a visibility reprojection', async () => {
+  const { store, module, listeners } = setup()
+  const first = track('1')
+  const second = { ...track('2'), source: { ...first.source, bvid: 'BVTEST00002', cid: 2 } }
+  const third = { ...track('3'), source: { ...first.source, bvid: 'BVTEST00003', cid: 3 } }
+  await store.getState().playFromList([first], first.id, { kind: 'season', title: '投稿', creatorMid: 42, creatorPage: 1, creatorTotal: 2 })
+  const expected = { source: store.getState().queueSource, page: 1, epoch: 0 }
+  module.useContentVisibility.setState({ rules: [{ scope: 'video:BVTEST00002', target: 'cid:2', hidden: true }] })
+  assert.equal(module.appendCreatorQueuePage(expected, [second, second], 2), true)
+  assert.deepEqual(store.getState().queueBase.map(t => t.id), ['1', '2'])
+  assert.deepEqual(store.getState().queueOrigins['2'], ['video:BVTEST00002'])
+  assert.deepEqual(store.getState().queue.map(t => t.id), ['1'])
+  assert.equal(store.getState().queueSource.creatorPage, 2)
+  store.getState().enqueue([third])
+  module.useContentVisibility.setState({ rules: [] })
+  assert.deepEqual(store.getState().queue.map(t => t.id), ['1', '2', '3'])
+  assert.equal(module.appendCreatorQueuePage(expected, [], 2), false)
+  listeners.pagehide()
+})
+
+test('reselecting the same creator queue rejects pending pages from its earlier instance', async () => {
+  const { store, module, listeners } = setup()
+  const first = track('1')
+  const source = { kind: 'season', title: '投稿', creatorMid: 42, creatorPage: 1, creatorTotal: 2 }
+  await store.getState().playFromList([first], first.id, source)
+  const expected = { source: store.getState().queueSource, page: 1, epoch: 0 }
+  await store.getState().playFromList([first], first.id, source)
+  assert.equal(module.appendCreatorQueuePage(expected, [], 2), false)
+  assert.equal(store.getState().queueSource.creatorPage, 1)
+  listeners.pagehide()
+})
+
 test('desktop sleep deadline pauses an active track on wake, blocks stale ended, and can repeat', async () => {
   let now = 1_800_000_000_000
   const oldClock = Date.now
@@ -363,6 +439,20 @@ test('playback rate changes in place and carries to the next song', async () => 
   assert.equal(audio[0].playbackRate, 1.5)
   assert.equal(audio[0].plays, 2)
   listeners.pagehide()
+})
+
+test('chosen playback rate is restored on restart and used at the first play', async () => {
+  const first = setup()
+  await first.store.getState().setRate(1.75)
+  const saved = JSON.parse(first.storage.get('resonance-player-v1'))
+  assert.equal(saved.state.rate, 1.75)
+  const restored = setup(saved)
+  assert.equal(restored.store.getState().rate, 1.75)
+  await restored.store.getState().play(track('1'))
+  assert.equal(restored.audio[0].playbackRate, 1.75)
+  await restored.store.getState().setRate(1)
+  assert.equal(setup(JSON.parse(restored.storage.get('resonance-player-v1'))).store.getState().rate, 1)
+  assert.equal(setup({version:2,state:{rate:9}}).store.getState().rate, 1)
 })
 
 test('resume slider defaults to all, persists disabled, and permits explicit positions', async () => {

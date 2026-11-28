@@ -9,6 +9,7 @@ import android.os.Build
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.core.graphics.Insets
 import android.webkit.WebView
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
@@ -39,6 +40,7 @@ class PlayArgs {
     var collectionRef: String? = null
     var automaticResume: AutomaticResumePolicy? = null
     var diagnosticId: String? = null
+    var accountSession: String? = null
 }
 @InvokeArg
 class LyricsArgs { var data: String = "{}" }
@@ -57,6 +59,15 @@ class ControlArgs {
     var coverUrl: String? = null
 }
 
+internal fun playbackWindowMargins(bars: Insets, immersive: Boolean, keepSystemInsets: Boolean): Insets =
+    when {
+        // Reserve the tablet's top inset in CSS so its backdrop can continue
+        // behind the status bar without resizing the WebView on open or close.
+        keepSystemInsets -> Insets.of(bars.left, 0, bars.right, bars.bottom)
+        immersive -> Insets.NONE
+        else -> bars
+    }
+
 @InvokeArg
 class SecretArgs {
     lateinit var key: String
@@ -73,7 +84,7 @@ class ListeningArgs {
 class ResolvedArgs { var request: Long = 0; var data: String = "{}" }
 
 @InvokeArg
-class DownloadPathArgs { lateinit var path: String }
+class DownloadPathArgs { lateinit var path: String; var skipExisting: Boolean = false }
 
 @InvokeArg
 class InstallUpdateArgs { lateinit var path: String; lateinit var version: String; var versionCode: Long? = null }
@@ -112,15 +123,20 @@ class PlayerPlugin(private val activity: Activity) : Plugin(activity) {
 
     @Command
     fun reset_download_destination(invoke: Invoke) {
-        try { downloadStorage.reset(); invoke.resolve(downloadStorage.status()) }
-        catch (_: Exception) { invoke.reject("无法恢复默认目录，请重新选择文件夹") }
+        downloadWorker.execute {
+            try { downloadStorage.reset(); invoke.resolve(downloadStorage.status()) }
+            catch (_: Exception) { invoke.reject("无法恢复默认目录，请重新选择文件夹") }
+        }
     }
 
     @Command
     fun save_download(invoke: Invoke) {
         val args = invoke.parseArgs(DownloadPathArgs::class.java)
         downloadWorker.execute {
-            try { downloadStorage.save(args.path); invoke.resolve() }
+            try {
+                val saved = downloadStorage.save(args.path, args.skipExisting)
+                if (args.skipExisting) invoke.resolve(JSObject().put("saved", saved)) else invoke.resolve()
+            }
             catch (error: Exception) {
                 invoke.reject(if (error is SecurityException) "保存文件夹的授权已失效，请在设置中重新选择下载目录"
                     else error.message ?: "保存失败，请检查文件夹权限与剩余空间")
@@ -261,6 +277,7 @@ class PlayerPlugin(private val activity: Activity) : Plugin(activity) {
     private var immersive = false
     private var keepSystemInsets = false
     private val drawsUnderSystemBars get() = immersive && !keepSystemInsets
+    private val drawsUnderStatusBar get() = immersive || keepSystemInsets
     private var largeScreen = false
 
     private fun setVideoFullscreen(enabled: Boolean) {
@@ -284,7 +301,7 @@ class PlayerPlugin(private val activity: Activity) : Plugin(activity) {
         activity.window.statusBarColor = android.graphics.Color.TRANSPARENT
         activity.window.navigationBarColor = android.graphics.Color.TRANSPARENT
         if (android.os.Build.VERSION.SDK_INT >= 29) {
-            activity.window.isStatusBarContrastEnforced = !immersive
+            activity.window.isStatusBarContrastEnforced = !drawsUnderStatusBar
             activity.window.isNavigationBarContrastEnforced = !immersive
         }
     }
@@ -299,13 +316,11 @@ class PlayerPlugin(private val activity: Activity) : Plugin(activity) {
             val bars = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars() or androidx.core.view.WindowInsetsCompat.Type.displayCutout())
             val keyboard = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.ime())
             val params = view.layoutParams as? android.view.ViewGroup.MarginLayoutParams
-            // Tablet lyrics use the same viewport as browsing so the WebView
-            // does not resize during a crossfade.
-            val drawUnderBars = drawsUnderSystemBars
-            val left = if (drawUnderBars) 0 else bars.left
-            val top = if (drawUnderBars) 0 else bars.top
-            val right = if (drawUnderBars) 0 else bars.right
-            val bottom = if (drawUnderBars) 0 else bars.bottom
+            val margins = playbackWindowMargins(bars, immersive, keepSystemInsets)
+            val left = margins.left
+            val top = margins.top
+            val right = margins.right
+            val bottom = margins.bottom
             params?.let {
                 if (it.leftMargin != left || it.topMargin != top || it.rightMargin != right || it.bottomMargin != bottom) {
                     it.setMargins(left, top, right, bottom)
@@ -313,13 +328,15 @@ class PlayerPlugin(private val activity: Activity) : Plugin(activity) {
                 }
             }
             val density = activity.resources.displayMetrics.density
-            val safeTop = if (drawUnderBars) bars.top / density else 0f
-            val safeBottom = if (drawUnderBars && keyboard.bottom == 0) bars.bottom / density else 0f
-            val safeLeft = if (drawUnderBars) bars.left / density else 0f
-            val safeRight = if (drawUnderBars) bars.right / density else 0f
+            val safeTop = (bars.top - top) / density
+            val safeBottom = if (keyboard.bottom == 0) (bars.bottom - bottom) / density else 0f
+            val safeLeft = (bars.left - left) / density
+            val safeRight = (bars.right - right) / density
             val keyboardOverlap = (keyboard.bottom - bottom).coerceAtLeast(0) / density
             val layoutHeight = (view.rootView.height - top - bottom).coerceAtLeast(0) / density
-            webView.evaluateJavascript("document.documentElement.style.setProperty('--native-layout-height','${layoutHeight}px');" +
+            val tabletInsetAttribute = if (keepSystemInsets) "setAttribute('data-android-tablet-insets','')" else "removeAttribute('data-android-tablet-insets')"
+            webView.evaluateJavascript("document.documentElement.$tabletInsetAttribute;" +
+                "document.documentElement.style.setProperty('--native-layout-height','${layoutHeight}px');" +
                 "document.documentElement.style.setProperty('--native-keyboard','${keyboardOverlap}px');" +
                 "window.dispatchEvent(new Event('bilimusic-keyboard'));" +
                 "document.documentElement.style.setProperty('--native-safe-top','${safeTop}px');" +
@@ -374,7 +391,7 @@ class PlayerPlugin(private val activity: Activity) : Plugin(activity) {
             return
         }
         val intent = Intent(activity, PlaybackService::class.java).setAction("load")
-            .putExtra("url", args.url).putExtra("id", args.id).putExtra("diagnosticId", args.diagnosticId)
+            .putExtra("url", args.url).putExtra("id", args.id).putExtra("diagnosticId", args.diagnosticId).putExtra("accountSession", args.accountSession)
             .putExtra("upgradeUrl", args.upgradeUrl?.takeIf { it.matches(Regex("^http://127\\.0\\.0\\.1:[0-9]+/.*")) })
             .putExtra("title", args.title).putExtra("artist", args.artist).putExtra("album", args.album)
             .putExtra("durationSeconds", args.durationSeconds)
@@ -415,10 +432,11 @@ class PlayerPlugin(private val activity: Activity) : Plugin(activity) {
                 setVideoFullscreen(args.value > 0)
             } else if (args.action == "immersive") {
                 val drewUnderSystemBars = drawsUnderSystemBars
+                val drewUnderStatusBar = drawsUnderStatusBar
                 immersive = args.value > 0
                 keepSystemInsets = args.keepSystemInsets
                 updateSystemBars()
-                if (drewUnderSystemBars != drawsUnderSystemBars) {
+                if (drewUnderSystemBars != drawsUnderSystemBars || drewUnderStatusBar != drawsUnderStatusBar) {
                     managedWebView?.let { androidx.core.view.ViewCompat.requestApplyInsets(it) }
                 }
             } else if (args.action == "theme") {

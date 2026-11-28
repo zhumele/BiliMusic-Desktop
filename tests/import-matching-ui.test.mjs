@@ -8,23 +8,22 @@ const require=createRequire(import.meta.url)
 const {QueryClient,QueryClientProvider}=require('@tanstack/react-query')
 const result=await build({stdin:{contents:`export {LibraryView} from './src/features/library/LibraryView';export {PlaylistMenu} from './src/features/library/PlaylistEntry';export {ReplacementSearch,formatMatchPlayCount} from './src/features/library/ReplacementDialog';export {ImportedPlaylistCompletionContent} from './src/features/library/ImportedPlaylistCompletion';export {accountQueryKey} from './src/services/queryKeys'`,resolveDir:process.cwd()},bundle:true,write:false,format:'cjs',platform:'node',jsx:'automatic',external:['react','react/jsx-runtime','@tanstack/react-query'],loader:{'.css':'empty'},plugins:[{name:'ui-boundaries',setup(b){
 const mocks={
- playerStore:`export const playbackIntent=()=>0;export const usePlayerStore=fn=>fn({current:null});usePlayerStore.getState=()=>({});`,
+ playerStore:`export const updatePlaybackFavorites=()=>{};export const playbackIntent=()=>0;export const usePlayerStore=fn=>fn({current:null});usePlayerStore.getState=()=>({});`,
  playlistImport:`export const usePlaylistImport=fn=>fn({job:globalThis.importUiJob||null});export const pausePlaylistImport=()=>{};export const retryMissingImportedPlaylist=async()=>{};export const searchReplacementVideos=async()=>({items:[],page:1,pageSize:20,total:0});export const resolveReplacementVideo=async()=>[];`,
  importedEntries:`export const loadImportedEntries=async()=>({session:'test',entries:[]});export const replaceImportedEntry=async()=>({session:'test',entries:[]});export const removeUnmatchedImportedEntry=async()=>({session:'test',entries:[]});`,
  useCompactLayout:`export const useCompactLayout=()=>false`,
  useLocateCurrentRow:`export const useLocateCurrentRow=()=>{}`,
  sourceTitles:`export const hydrateSourceTitles=async()=>{}`,
- sync:`export const hydrateVisibleTracks=async()=>{}`,
+ librarySync:`export const hydrateVisibleTracks=async()=>{}`,
  TrackMenuButton:`import {createElement} from 'react';export const TrackMenuButton=p=>createElement('button',{'data-track-menu':p.track.id,'data-can-replace':Boolean(p.actions?.replaceVideo)},'更多操作')`,
  DownloadsView:`export const DownloadsView=()=>null`,
- ListSort:`export const ListSort=()=>null;export const useListSort=()=>({rule:'source:asc',dates:{},playCounts:{}})`,
  useTrackSelection:`export const useTrackSelection=()=>({selecting:false,exit(){},enter(){},ids:new Set()});export const BatchTrackActions=()=>null`,
  ActionMenu:`import {createElement} from 'react';export const ActionMenu=({children})=>createElement('aside',null,children(()=>{}))`,
  platform:`export const isMobile=false,isIOS=false,isAndroid=false,isOHOS=false,isLargeScreen=false`,
  core:`export const isTauri=()=>false;export const invoke=async()=>null;export class Channel {}`,
 }
 b.onResolve({filter:/@tauri-apps\/api\/core$/},()=>({path:'core',namespace:'fixture'}))
-b.onResolve({filter:/\/(playerStore|playlistImport|importedEntries|useCompactLayout|useLocateCurrentRow|sourceTitles|sync|TrackMenuButton|DownloadsView|ListSort|useTrackSelection|ActionMenu|platform)$/},a=>({path:a.path.split('/').at(-1),namespace:'fixture'}))
+b.onResolve({filter:/\/(playerStore|playlistImport|importedEntries|useCompactLayout|useLocateCurrentRow|sourceTitles|librarySync|TrackMenuButton|DownloadsView|useTrackSelection|ActionMenu|platform)$/},a=>({path:a.path.split('/').at(-1),namespace:'fixture'}))
 b.onLoad({filter:/.*/,namespace:'fixture'},a=>({contents:mocks[a.path],loader:'js'}))
 }}]})
 const m={exports:{}};new Function('require','module','exports',result.outputFiles[0].text)(require,m,m.exports)
@@ -36,22 +35,45 @@ const saved={entryId:'row1',playlistId:playlist.id,order:0,song:{sourceId:'qq:1'
 const missing={entryId:'row2',playlistId:playlist.id,order:8,song:{sourceId:'qq:2',title:'MISSING_SONG',artists:['SOURCE_ARTIST']},revision:'1',message:'该视频已在歌单中，请选择其他视频'}
 function render(Component,props={},entries=[saved,missing],tracks=[track,ordinary]){
  const client=new QueryClient({defaultOptions:{queries:{staleTime:Infinity,retry:false}}})
- client.setQueryData(accountQueryKey('library','saved',playlist.id),tracks)
- client.setQueryData(accountQueryKey('imported-entries',playlist.id),{session:'test',entries})
+ const playlistId=props.playlist?.id??playlist.id
+ client.setQueryData(accountQueryKey('library','saved',playlistId),tracks)
+ client.setQueryData(accountQueryKey('imported-entries',playlistId),{session:'test',entries})
  return renderToStaticMarkup(createElement(QueryClientProvider,{client},createElement(Component,props)))
 }
-test('only external provenance entries expose replacement, not ordinary songs sharing the import playlist',()=>{
+test('both editable playlist entries expose replacement while retaining catalog presentation',()=>{
  const html=render(LibraryView,{playlist,onRematchImported(){}})
- assert.equal((html.match(/data-can-replace="true"/g)||[]).length,1)
- assert.equal((html.match(/data-can-replace="false"/g)||[]).length,1)
+ assert.equal((html.match(/data-can-replace="true"/g)||[]).length,2)
  assert.ok(html.includes('SOURCE_SONG'));assert.ok(html.includes('SOURCE_ARTIST'));assert.ok(html.includes('https://example.test/original.jpg'))
  assert.ok(html.includes('MANUALLY_ADDED_VIDEO'))
  assert.equal(track.title,'VIDEO_RAW_TITLE');assert.equal(track.artist,'VIDEO_RAW_ARTIST');assert.equal(track.coverUrl,'https://example.test/raw.jpg')
 })
-test('Bilibili copies have no replacement or completion entry merely because their ID has an import prefix',()=>{
+test('Bilibili copies can replace a video while completion still requires import provenance',()=>{
  const html=render(LibraryView,{playlist,onRematchImported(){}},[])
- assert.equal(html.includes('data-can-replace="true"'),false)
+ assert.equal(html.includes('data-can-replace="true"'),true)
  assert.equal(html.includes('补全未匹配'),false)
+})
+test('imported, copied, regular and favorite playlists expose the same track organizer and custom order',()=>{
+ const localPlaylists = [[playlist,[saved,missing]], [playlist,[]], [{...playlist,id:'custom'},[]], [{...playlist,id:'system:favorites',isSystem:true},[]]]
+ for(const [local,entries] of localPlaylists){
+  const html=render(LibraryView,{playlist:local},entries)
+  const button=html.match(/<button[^>]*aria-label="整理曲目"[^>]*>/)?.[0]
+  assert.ok(button)
+  assert.doesNotMatch(button,/disabled=/)
+  assert.match(html,/<span>自定义顺序<\/span>/)
+  assert.doesNotMatch(html,/<span>默认顺序<\/span>/)
+ }
+ const oneMatch=render(LibraryView,{playlist},[saved,missing],[track])
+ assert.match(oneMatch,/<button[^>]*aria-label="整理曲目"[^>]*disabled=/)
+ assert.doesNotMatch(oneMatch,/MISSING_SONG/)
+})
+test('system and linked playlists do not expose editing actions',()=>{
+ for(const special of [{isSystem:true},{biliFolderId:42}]){
+  const html=render(LibraryView,{playlist:{...playlist,...special}})
+  assert.equal(html.includes('data-can-replace="true"'),false)
+  assert.equal(html.includes('aria-label="整理曲目"'),false)
+  assert.equal(html.includes('查找重复'),false)
+  assert.match(html,/<span>默认顺序<\/span>/)
+ }
 })
 test('completion entry remains usable even if no matched song exists yet',()=>{
  const html=render(PlaylistMenu,{playlist:{...playlist,trackCount:0},onRematch(){},missingCount:822})

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { build } from 'esbuild'
 
 const output = await build({ entryPoints: ['src/features/lyrics/videoSync.ts'], bundle: true, write: false, format: 'esm' })
-const { synchronizeVideo } = await import(`data:text/javascript;base64,${Buffer.from(output.outputFiles[0].text).toString('base64')}`)
+const { createBufferedFrameWatch, synchronizeVideo } = await import(`data:text/javascript;base64,${Buffer.from(output.outputFiles[0].text).toString('base64')}`)
 function video(overrides = {}) { return { readyState: 4, seeking: false, currentTime: 10, playbackRate: 1, paused: true, buffered: { length: 0 }, plays: 0, pause() { this.paused = true }, async play() { this.paused = false; this.plays++ }, ...overrides } }
 
 test('initial sync seeks once after metadata is available', () => {
@@ -31,10 +31,25 @@ test('already aligned first frame does not trigger another startup seek', () => 
 })
 test('a short audio lead at startup keeps the initial video request', () => {
   const element = video({ readyState: 1, currentTime: 0 })
-  assert.equal(synchronizeVideo(element, .8, true, .6, true, .2, 1, true), false)
+  const startup = { waitForDecodedFrame: false }
+  assert.equal(synchronizeVideo(element, .8, true, .6, true, .2, 1, startup), false)
   assert.equal(element.currentTime, 0)
-  synchronizeVideo(element, 12, true, .8, false, .25, 1, true)
+  synchronizeVideo(element, 12, true, .8, false, .25, 1, startup)
   assert.equal(element.currentTime, 12)
+})
+
+test('old car WebView defers initial alignment at metadata and seeks when a frame is decoded', () => {
+  const element = video({ currentTime: 0, readyState: 1, paused: false })
+  const startup = { waitForDecodedFrame: true }
+  const initialAlignment = synchronizeVideo(element, 4, true, 3.75, true, .25, 1, startup)
+  assert.equal(initialAlignment, true)
+  assert.equal(element.currentTime, 0)
+  const pendingAlignment = synchronizeVideo(element, 34, true, 4, initialAlignment, .25, 1, startup)
+  assert.equal(pendingAlignment, true)
+  assert.equal(element.currentTime, 0)
+  element.readyState = 2
+  assert.equal(synchronizeVideo(element, 34.25, true, 34, pendingAlignment, .25, 1, startup), false)
+  assert.equal(element.currentTime, 34.25)
 })
 test('small drift adjusts playback speed without discarding buffered frames', () => {
   const element = video()
@@ -82,4 +97,17 @@ test('video follows audio at 2× without treating expected progress as a seek', 
   assert.equal(element.currentTime, 12)
   synchronizeVideo(element, 20, true, 12, false, .25, 2)
   assert.equal(element.currentTime, 20)
+})
+
+test('the old car decoder retry requires buffered video, stationary frames and advancing audio', () => {
+  const watch = createBufferedFrameWatch()
+  const buffered = { length: 1, start: () => 0, end: () => 54 }
+  assert.equal(watch.stalled(buffered, .6, 8, 1, 0), false)
+  assert.equal(watch.stalled(buffered, .6, 8, 1, 2500), false)
+  assert.equal(watch.stalled(buffered, 1.7, 8, 3.5, 2750), true)
+  watch.reset()
+  assert.equal(watch.stalled(buffered, 1.7, 8, 4, 3000), false)
+  assert.equal(watch.stalled(buffered, 5, 90, 6.5, 5500), false)
+  assert.equal(watch.stalled(buffered, 60, 90, 60, 8000), false)
+  assert.equal(watch.stalled(buffered, 1.7, undefined, 3, 10500), false)
 })

@@ -1,5 +1,8 @@
-mod source_titles;
 pub mod chapters;
+pub(crate) mod favorite_order;
+pub(crate) mod playlist_order;
+mod register_extension;
+mod source_titles;
 pub mod visibility;
 pub(crate) use source_titles::save as cache_source_titles;
 pub mod actor;
@@ -7,20 +10,17 @@ pub mod background;
 mod cache;
 pub mod causal;
 mod cloud_transport;
-mod dav;
 pub mod device_policy;
 pub mod devices;
 mod engine;
-mod legacy_import;
 pub mod migration;
-pub mod migration_material;
 pub mod model;
 pub mod outbox;
 mod projection;
-pub(crate) mod repair;
 pub mod protocol_v2;
 pub mod publication;
 mod recovery;
+pub(crate) mod repair;
 pub(crate) mod request_budget;
 mod scheduler;
 #[cfg(test)]
@@ -49,12 +49,14 @@ pub struct SyncState {
     pub gate: tokio::sync::Mutex<()>,
     pub statistics_gate: tokio::sync::Mutex<()>,
     statistics_active: std::sync::Mutex<Option<tokio_util::sync::CancellationToken>>,
+    source_hydration: source_titles::Hydration,
     // Playback only waits for actual account mutations, never sync HTTP requests.
     pub account_gate: tokio::sync::Mutex<()>,
     active: std::sync::Mutex<Option<tokio_util::sync::CancellationToken>>,
 }
 impl SyncState {
     pub fn interrupt(&self) {
+        self.source_hydration.cancel();
         if let Ok(active) = self.statistics_active.lock() {
             if let Some(token) = active.as_ref() {
                 token.cancel();
@@ -110,6 +112,7 @@ pub struct Status {
     pub visibility_error: Option<String>,
     pub import_error: Option<String>,
     pub chapters_error: Option<String>,
+    pub favorite_order_error: Option<String>,
     pub local_error: Option<String>,
     pub track_repair: Option<repair::Preview>,
     pub config: Config,
@@ -125,13 +128,17 @@ pub struct Outcome {
     pub visibility_error: Option<String>,
     pub import_error: Option<String>,
     pub chapters_error: Option<String>,
+    pub favorite_order_error: Option<String>,
     pub records: usize,
     pub bytes: usize,
     pub changed: bool,
 }
 impl Outcome {
     fn has_extension_error(&self) -> bool {
-        self.import_error.is_some() || self.visibility_error.is_some() || self.chapters_error.is_some()
+        self.import_error.is_some()
+            || self.visibility_error.is_some()
+            || self.chapters_error.is_some()
+            || self.favorite_order_error.is_some()
     }
 }
 fn config(db: &Database) -> Result<Config, String> {
@@ -161,8 +168,8 @@ fn active(db: &Database, uid: &str) -> Result<(), String> {
         Ok(())
     }
 }
-fn secret(
-    app: &AppHandle,
+fn secret<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     c: &Config,
     value: Option<&str>,
     remove: bool,
@@ -249,12 +256,15 @@ pub fn sync_status(database: State<'_, Database>) -> Result<Status, String> {
         visibility_error: sync_area_error(&c, "visibility-error")?,
         import_error: sync_area_error(&c, "import-error")?,
         chapters_error: sync_area_error(&c, "chapters-error")?,
+        favorite_order_error: sync_area_error(&c, "favorite-order-error")?,
         local_error,
         config: cfg,
         track_repair,
         last_success: last,
         records: snapshot.as_ref().map_or(0, |s| s.records.len()),
-        bytes: snapshot.as_ref().map_or(0, |s| serde_json::to_vec(s).unwrap().len()),
+        bytes: snapshot
+            .as_ref()
+            .map_or(0, |s| serde_json::to_vec(s).unwrap().len()),
     })
 }
 
@@ -271,8 +281,8 @@ fn sync_area_error(c: &rusqlite::Connection, key: &str) -> Result<Option<String>
     .map(Option::flatten)
 }
 #[tauri::command]
-pub async fn sync_connect(
-    app: AppHandle,
+pub async fn sync_connect<R: tauri::Runtime>(
+    app: AppHandle<R>,
     database: State<'_, Database>,
     provider: State<'_, BilibiliProvider>,
     state: State<'_, SyncState>,
@@ -313,7 +323,6 @@ pub async fn sync_connect(
     if !matches!(settings.provider.as_str(), "cloud" | "webdav") {
         return Err("无效的同步服务商".into());
     }
-    transport::endpoint(&settings)?;
     let credentials = if settings.provider == "cloud" {
         let cookie = {
             let c = database.0.lock().map_err(|_| "数据库正忙")?;
@@ -323,6 +332,7 @@ pub async fn sync_connect(
         };
         transport::authenticate(cookie, &settings.uid).await?
     } else {
+        transport::validate_nutstore(&settings)?;
         if username.trim().is_empty() || password.is_empty() {
             return Err("请输入坚果云账号和应用密码".into());
         }
@@ -331,32 +341,25 @@ pub async fn sync_connect(
             password,
         }
     };
-    // Bind the legacy provider-only baseline BEFORE replacing its credentials.
-    // Unidentifiable provenance stays quarantined, never attached to the new target.
+    // Keep the old BiliMusic Cloud baseline associated with its original credentials.
     let previous = config(&database)?;
-    let previous_target = secret(&app, &previous, None, false)
-        .ok()
-        .flatten()
-        .and_then(|value| serde_json::from_str::<transport::Secret>(&value).ok())
-        .and_then(|value| {
-            storage::target_key(
-                &previous.provider,
-                &previous.uid,
-                &previous.url,
-                &value.username,
-            )
+    if previous.provider == "cloud" {
+        let previous_target = secret(&app, &previous, None, false)
             .ok()
-        })
-        .unwrap_or_else(|| "unbound-legacy".into());
-    {
+            .flatten()
+            .and_then(|value| serde_json::from_str::<transport::Secret>(&value).ok())
+            .and_then(|value| {
+                storage::target_key("cloud", &previous.uid, &previous.url, &value.username).ok()
+            })
+            .unwrap_or_else(|| "unbound-legacy".into());
         let c = database.0.lock().map_err(|_| "数据库正忙")?;
-        storage::bind_legacy(&c, &previous.provider, &previous_target)?;
+        storage::bind_cloud_baseline(&c, &previous_target)?;
     }
     // Read-only connection test. A new remote will only be created by explicit first sync.
     if settings.provider == "webdav" {
         engine::probe(&settings, &credentials).await?;
     } else {
-        transport::read(&settings, &credentials).await?;
+        cloud_transport::read(&settings, &credentials).await?;
     }
     secret(
         &app,
@@ -396,8 +399,8 @@ pub async fn sync_pause(
     save(&database, &c)
 }
 #[tauri::command]
-pub async fn sync_disconnect(
-    app: AppHandle,
+pub async fn sync_disconnect<R: tauri::Runtime>(
+    app: AppHandle<R>,
     database: State<'_, Database>,
     state: State<'_, SyncState>,
 ) -> Result<(), String> {
@@ -465,8 +468,8 @@ pub fn sync_conflict_options(
     engine::get(&c, &target, "conflict-menu")?.ok_or("请先预览同步冲突".into())
 }
 #[tauri::command]
-pub async fn sync_now(
-    app: AppHandle,
+pub async fn sync_now<R: tauri::Runtime>(
+    app: AppHandle<R>,
     database: State<'_, Database>,
     state: State<'_, SyncState>,
     resolution: Option<String>,
@@ -475,7 +478,8 @@ pub async fn sync_now(
 ) -> Result<Outcome, String> {
     let auto = automatic.unwrap_or(false);
     background::run(
-        app.try_state::<crate::infrastructure::diagnostics::Diagnostics>().map(|state| state.inner().clone()),
+        app.try_state::<crate::infrastructure::diagnostics::Diagnostics>()
+            .map(|state| state.inner().clone()),
         &database,
         &state,
         scheduler::Domain::Library,
@@ -504,14 +508,15 @@ pub async fn sync_now(
             visibility_error: None,
             import_error: None,
             chapters_error: None,
+            favorite_order_error: None,
             records: 0,
             bytes: 0,
             changed: false,
         })
     })
 }
-async fn sync_now_inner(
-    app: AppHandle,
+async fn sync_now_inner<R: tauri::Runtime>(
+    app: AppHandle<R>,
     database: State<'_, Database>,
     state: State<'_, SyncState>,
     resolution: Option<String>,
@@ -546,9 +551,12 @@ async fn sync_now_inner(
             Ok(outcome)
         }=>result};
     }
+    if cfg.provider != "cloud" {
+        return Err("未知的同步服务".into());
+    }
     let (initial, base) = {
         let c = database.0.lock().map_err(|_| "数据库正忙")?;
-        storage::bind_legacy(&c, &cfg.provider, &target)?;
+        storage::bind_cloud_baseline(&c, &target)?;
         let current = storage::export(&c, &cfg.uid, cfg.history)?;
         let base = c
             .query_row(
@@ -564,7 +572,10 @@ async fn sync_now_inner(
         (current, base)
     };
     for _ in 0..3 {
-        let response = tokio::select! { _=cancellation.cancelled()=>return Err("同步已取消".into()),response=async { if cfg.provider == "webdav" { dav::read_cached(&cfg,&credentials,Some(&database.1.join("sync-cache").join(&target))).await } else { transport::read(&cfg,&credentials).await } }=>response };
+        let response = tokio::select! {
+            _ = cancellation.cancelled() => return Err("同步已取消".into()),
+            response = cloud_transport::read(&cfg, &credentials) => response,
+        };
         let remote = match response {
             Ok(r) => r,
             Err(e) => {
@@ -575,20 +586,12 @@ async fn sync_now_inner(
                 return Err(e);
             }
         };
-        if cfg.provider == "webdav" {
-            if let Some(dav) = &remote.dav {
-                let c = database.0.lock().map_err(|_| "数据库正忙")?;
-                devices::observe(&c, &target, &dav.observations)?;
-            }
-        }
         let mut initial = initial.clone();
         let mut baseline = base.clone();
-        if cfg.provider != "webdav" {
-            initial.omit_linked_folders();
-            baseline.omit_linked_folders();
-            initial.omit_followed_season_progress();
-            baseline.omit_followed_season_progress();
-        }
+        initial.omit_linked_folders();
+        baseline.omit_linked_folders();
+        initial.omit_followed_season_progress();
+        baseline.omit_followed_season_progress();
         if remote.legacy_cloud {
             initial.use_legacy_cloud_format();
             baseline.use_legacy_cloud_format();
@@ -605,35 +608,17 @@ async fn sync_now_inner(
             initial.omit_folder_scopes();
             baseline.omit_folder_scopes();
         }
+        let initial_with_full_bias = initial.clone();
+        if !remote.wide_lyric_bias {
+            cloud_transport::project_lyric_bias(&mut initial);
+            cloud_transport::project_lyric_bias(&mut baseline);
+        }
         let mut local = initial.clone();
         if !cfg.history {
             preserve_history(&mut baseline, &mut local, &remote.snapshot);
         }
-        let effective_remote = if !remote.conflicts.is_empty() && resolution.is_some() {
-            let state = remote.dav.as_ref().ok_or("并发状态缺失")?;
-            let mut main = initial.clone();
-            main.omit_linked_folders();
-            let mut resolved = state
-                .doc
-                .resolved(&main, resolution.as_deref() == Some("local"))?;
-            if let Some(linked) = state.linked.as_ref() {
-                resolved.records.extend(
-                    linked
-                        .doc
-                        .resolved(
-                            &initial.linked_folders(),
-                            resolution.as_deref() == Some("local"),
-                        )?
-                        .records,
-                );
-            }
-            resolved
-        } else {
-            remote.snapshot.clone()
-        };
-        let (mut merged, mut conflicts) =
-            merge(&baseline, &local, &effective_remote, resolution.as_deref());
-        conflicts.extend(remote.conflicts.clone());
+        let (mut merged, conflicts) =
+            merge(&baseline, &local, &remote.snapshot, resolution.as_deref());
         merged.compact(true);
         merged.restore_missing_tracks();
         merged.validate(&cfg.uid)?;
@@ -646,6 +631,7 @@ async fn sync_now_inner(
                 visibility_error: None,
                 import_error: None,
                 chapters_error: None,
+                favorite_order_error: None,
                 records: count,
                 bytes,
                 changed: merged != remote.snapshot,
@@ -656,18 +642,15 @@ async fn sync_now_inner(
             let c = database.0.lock().map_err(|_| "数据库正忙")?;
             c.execute(
                 "INSERT INTO sync_info(key,value) VALUES('backup',?1) ON CONFLICT(key) DO NOTHING",
-                [serde_json::to_string(&initial).unwrap()],
+                [serde_json::to_string(&initial_with_full_bias).unwrap()],
             )
             .map_err(|e| e.to_string())?;
         }
-        if merged != remote.snapshot
-            || remote.version.is_none()
-            || !remote.conflicts.is_empty()
-            || remote.dav.as_ref().is_some_and(|d| {
-                d.needs_publish || d.linked.as_ref().is_some_and(|l| l.needs_publish)
-            })
-        {
-            let written = tokio::select! { _=cancellation.cancelled()=>return Err("同步已取消".into()),result=transport::write(&cfg,&credentials,&remote,&merged)=>result }?;
+        if merged != remote.snapshot || remote.version.is_none() {
+            let written = tokio::select! {
+                _ = cancellation.cancelled() => return Err("同步已取消".into()),
+                result = cloud_transport::write(&cfg, &credentials, &remote, &merged) => result,
+            }?;
             if !written {
                 continue;
             }
@@ -676,14 +659,12 @@ async fn sync_now_inner(
         if cancellation.is_cancelled() {
             return Err("同步已取消".into());
         }
-        let final_local = {
+        let changed = {
             let c = database.0.lock().map_err(|_| "数据库正忙")?;
             let mut current = storage::export(&c, &cfg.uid, cfg.history)?;
             let local_linked = current.linked_folders();
-            if cfg.provider != "webdav" {
-                current.omit_linked_folders();
-                current.omit_followed_season_progress();
-            }
+            current.omit_linked_folders();
+            current.omit_followed_season_progress();
             if remote.legacy_cloud {
                 current.use_legacy_cloud_format();
             }
@@ -713,11 +694,20 @@ async fn sync_now_inner(
                 current.omit_creators();
             }
             // Rebase edits made while network IO was in flight. Never overwrite a new local edit.
-            let (mut final_local, post_conflicts) =
-                merge(&initial, &current, &merged, Some("local"));
-            if cfg.provider != "webdav" {
-                final_local.records.extend(local_linked.records);
+            let mut merged_for_device = merged.clone();
+            if !remote.wide_lyric_bias {
+                cloud_transport::restore_local_lyric_bias(
+                    &mut merged_for_device,
+                    &initial_with_full_bias,
+                );
             }
+            let (mut final_local, post_conflicts) = merge(
+                &initial_with_full_bias,
+                &current,
+                &merged_for_device,
+                Some("local"),
+            );
+            final_local.records.extend(local_linked.records);
             if !remote.creators {
                 final_local.records.extend(local_creators);
             }
@@ -739,21 +729,20 @@ async fn sync_now_inner(
             c.execute("INSERT INTO sync_info(key,value) VALUES(?1,datetime('now')) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[format!("last_success:{target}")]).map_err(|e|e.to_string())?;
             c.execute("INSERT INTO sync_info(key,value) VALUES('active_target',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[&target]).map_err(|e|e.to_string())?;
             tx.commit().map_err(|e| e.to_string())?;
-            final_local
+            initial_with_full_bias != final_local
         };
         cfg.initialized = true;
         save(&database, &cfg)?;
-        // Capability bookkeeping must not turn a successful library merge into a failed sync.
-        let _ = devices::after_sync(&database, &cfg, &credentials).await;
         return Ok(Outcome {
             skipped: false,
             conflicts: vec![],
             visibility_error: None,
             import_error: None,
-                chapters_error: None,
+            chapters_error: None,
+            favorite_order_error: None,
             records: count,
             bytes,
-            changed: initial != final_local,
+            changed,
         });
     }
     Err("其它设备正在修改，请稍后重新同步".into())
@@ -783,60 +772,35 @@ pub async fn sync_hydrate_sources(
     database: State<'_, Database>,
     provider: State<'_, BilibiliProvider>,
     state: State<'_, SyncState>,
+    expected_account_session: String,
     track_ids: Option<Vec<String>>,
     title_ids: Option<Vec<String>>,
 ) -> Result<usize, String> {
-    let _gate = state.gate.lock().await;
-    if let Some(ids) = title_ids {
-        return source_titles::hydrate(&database, &provider, ids).await;
-    }
-    let videos: Vec<String> = {
-        let c = database.0.lock().map_err(|_| "数据库正忙")?;
-        let mut q=c.prepare("SELECT id,bvid FROM source_items WHERE source_title='' OR source_title='B站歌曲（待加载）' ORDER BY bvid LIMIT 5000").map_err(|e|e.to_string())?;
-        let rows = q
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-            .map_err(|e| e.to_string())?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
-        rows.into_iter()
-            .filter(|(id, _)| track_ids.as_ref().is_none_or(|ids| ids.contains(id)))
-            .map(|(_, bvid)| bvid)
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .take(10)
-            .collect()
-    };
-    let mut count = if track_ids.is_none() {
-        crate::interface::linked_folders::hydrate_synced_links(&database)
-            .await
-            .unwrap_or(0)
-    } else {
-        0
-    };
-    for bvid in videos {
-        if let Ok(video) = provider.video_parts(&bvid).await {
-            let c = database.0.lock().map_err(|_| "数据库正忙")?;
-            for part in &video.parts {
-                let id = format!("bilibili:{bvid}:{}", part.cid);
-                let title = crate::domain::source_title::source_title(
-                    &video.title,
-                    &part.title,
-                    video.parts.len(),
-                    video.season.is_some(),
-                    video
-                        .season
-                        .as_ref()
-                        .map(|s| s.title.as_str())
-                        .unwrap_or(""),
-                );
-                c.execute("UPDATE source_items SET aid=?2,page=?3,source_title=?4,uploader_id=?5,uploader_name=?6 WHERE id=?1 AND (source_title='' OR source_title='B站歌曲（待加载）')",params![id,video.aid,part.page,title,video.uploader_id,video.uploader_name]).map_err(|e|e.to_string())?;
-                count += c.execute("UPDATE tracks SET title=?2,cover_url=?3,duration_seconds=?4 WHERE id=?1 AND title='B站歌曲（待加载）'",params![id,title,part.cover_url,part.duration_seconds]).map_err(|e|e.to_string())?;
+    state
+        .source_hydration
+        .run(&database, &expected_account_session, async {
+            match title_ids {
+                Some(ids) => {
+                    source_titles::hydrate_titles(
+                        &database,
+                        &provider,
+                        &expected_account_session,
+                        ids,
+                    )
+                    .await
+                }
+                None => {
+                    source_titles::hydrate_placeholders(
+                        &database,
+                        &provider,
+                        &expected_account_session,
+                        track_ids,
+                    )
+                    .await
+                }
             }
-        } else {
-            break;
-        }
-    }
-    Ok(count)
+        })
+        .await
 }
 
 #[tauri::command]
@@ -872,8 +836,8 @@ pub async fn sync_export(
     Ok(path.to_string_lossy().into())
 }
 #[tauri::command]
-pub async fn sync_delete_cloud(
-    app: AppHandle,
+pub async fn sync_delete_cloud<R: tauri::Runtime>(
+    app: AppHandle<R>,
     database: State<'_, Database>,
     state: State<'_, SyncState>,
 ) -> Result<(), String> {

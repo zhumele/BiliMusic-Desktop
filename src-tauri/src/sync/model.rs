@@ -81,9 +81,8 @@ impl Snapshot {
     }
     pub(super) fn omit_followed_season_progress(&mut self) {
         let direct = self.collection_references();
-        self.records.retain(|_, r| {
-            r.kind != "collectionProgress" || direct.contains(text(r, "reference"))
-        });
+        self.records
+            .retain(|_, r| r.kind != "collectionProgress" || direct.contains(text(r, "reference")));
     }
     fn collection_references(&self) -> BTreeSet<String> {
         self.records
@@ -382,7 +381,13 @@ impl Snapshot {
                 "lyric" => {
                     key == &format!("lyric:{id}")
                         && matches!(text(r, "provider"), "lrclib" | "netease" | "qq" | "local")
-                        && number(r, "biasMs").unsigned_abs() <= 30_000
+                        && r.fields
+                            .get("biasMs")
+                            .and_then(Value::as_i64)
+                            .is_some_and(|bias| {
+                                bias.unsigned_abs()
+                                    <= crate::infrastructure::repositories::lyrics::MAX_SAFE_BIAS_MS
+                            })
                 }
                 _ => false,
             };
